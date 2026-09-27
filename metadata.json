@@ -1,0 +1,8 @@
+{
+  "name": "Remix ScanESP32 3D - Simulator",
+  "description": "v2.0.0 - Simulador y emulador de código ESP32 con comunicación serial bidireccional, navegación autónoma del Punto A al Punto B, detección y esquive inteligente de obstáculos con radar HC-SR04 y optimización de trayectorias.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
