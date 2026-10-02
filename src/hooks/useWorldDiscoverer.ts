@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import confetti from 'canvas-confetti';
 import {
   DiscoveredPoint2D,
@@ -16,10 +16,23 @@ import {
   NavState,
   NavigationRouteStats,
   MapInteractionMode,
+  AIRouteOptimizationResult,
+  RecognizedObstacle,
 } from '../types/worldDiscoverer';
 import { simulateSonarPing, WORLD_PRESETS } from '../utils/worldSimulator';
 import { radarAudio } from '../utils/audioSynth';
 import { esp32Emulator } from '../utils/esp32SimulatorEngine';
+import { optimizeRouteWithGemini } from '../utils/aiRouteOptimizer';
+import {
+  VoronoiCell,
+  VoronoiLloydResult,
+  ArchimedeanSpiralConfig,
+  DEFAULT_SPIRAL_CONFIG,
+  generateVoronoiWithLloyd,
+  generateArchimedeanSpiralPoints,
+  computeCellMaxInradius,
+  Point2D,
+} from '../utils/voronoiLloyd';
 
 export function useWorldDiscoverer() {
   // Connection state
@@ -132,6 +145,39 @@ export function useWorldDiscoverer() {
   const [detourDistanceCm, setDetourDistanceCm] = useState(0);
   const [obstaclesAvoidedCount, setObstaclesAvoidedCount] = useState(0);
 
+  // AI Optimal Route Planning State
+  const [aiOptimizationResult, setAiOptimizationResult] = useState<AIRouteOptimizationResult | null>(null);
+  const [isOptimizingWithAI, setIsOptimizingWithAI] = useState(false);
+  const [optimizationMode, setOptimizationMode] = useState<'balanced' | 'min_turns' | 'min_distance'>('balanced');
+  const [showCandidateIterations, setShowCandidateIterations] = useState(true);
+
+  // Voronoi Partitioning & Lloyd's Relaxation State (Enforcing min 5m distance between points)
+  const [voronoiResult, setVoronoiResult] = useState<VoronoiLloydResult>(() =>
+    generateVoronoiWithLloyd({ minX: -600, maxX: 600, minY: -100, maxY: 1100 }, undefined, 8, 0, 500)
+  );
+
+  // Archimedean Spiral Config & Path State (Constrained strictly to Voronoi partition limits)
+  const [spiralConfig, setSpiralConfig] = useState<ArchimedeanSpiralConfig>(() => {
+    const initVoronoi = generateVoronoiWithLloyd({ minX: -600, maxX: 600, minY: -100, maxY: 1100 }, undefined, 8, 0, 500);
+    const assignedCell = initVoronoi.cells.find((c) => c.isAssigned) || initVoronoi.cells[0];
+    const cellInradius = computeCellMaxInradius(initVoronoi.assignedCentroid, assignedCell.polygon);
+    const safeMaxRadius = Math.min(140, Math.max(15, Math.floor(cellInradius - 15)));
+
+    return {
+      ...DEFAULT_SPIRAL_CONFIG,
+      center: initVoronoi.assignedCentroid,
+      maxRadiusCm: safeMaxRadius,
+      boundaryPolygon: assignedCell.polygon,
+    };
+  });
+
+  const [recognizedObstacles, setRecognizedObstacles] = useState<RecognizedObstacle[]>([]);
+  const [rs232Logs, setRs232Logs] = useState<string[]>([]);
+
+  const spiralPreviewPoints = useMemo(() => {
+    return generateArchimedeanSpiralPoints(spiralConfig, 6, spiralConfig.boundaryPolygon, 15);
+  }, [spiralConfig]);
+
   // Virtual ESP32 Hardware Pins monitor
   const [hardwarePins, setHardwarePins] = useState({
     servoAngle: 90,
@@ -225,13 +271,12 @@ export function useWorldDiscoverer() {
       const beamRad = (beamAngleDeg * Math.PI) / 180;
 
       setPoints((prev) => {
-        // REGLA: "como quedan dibujadas las paredes sin borrarse"
-        // Las paredes descubiertas permanecen dibujadas permanentemente en el mapa sin borrarse.
+        // Registro permanente de puntos detectados por el sensor sobre los obstáculos
         if (distanceCm >= 70.0) {
           return prev;
         }
 
-        // Calcular coordenadas globales exactas para la pared a distancia < 70 cm
+        // Calcular coordenadas globales exactas para el obstáculo a distancia < 70 cm
         let worldX: number;
         let worldY: number;
 
@@ -275,7 +320,7 @@ export function useWorldDiscoverer() {
           timestamp: now,
           sweepCycle: roverState.totalSweepsCompleted,
           hits: 1,
-          type: classification || (distanceCm < 40 ? 'obstacle' : 'wall'),
+          type: classification || 'obstacle',
         };
 
         if (prev.length > 1200) {
@@ -1133,6 +1178,20 @@ export function useWorldDiscoverer() {
       } else if (line.startsWith('NAV:STATUS,')) {
         const st = line.substring(11).split(',')[0].trim() as NavState;
         if (st) setNavState(st);
+      } else if (line.startsWith('ESP32:CENTROID_REACHED')) {
+        setNavState('EXECUTING_SPIRAL');
+        addLog('ESP32: Centroide alcanzado. Iniciando Espiral de Arquímedes confinada a la partición de Voronoi.', 'sys');
+      } else if (line.startsWith('ESP32:SPIRAL_COMPLETE')) {
+        setNavState('SPIRAL_COMPLETE');
+        setGoalReached(true);
+        setIsNavigating(false);
+        radarAudio.playSweepCycleComplete();
+        confetti({
+          particleCount: 80,
+          spread: 70,
+          origin: { y: 0.6 },
+        });
+        addLog('ESP32: ¡Espiral completada con éxito dentro de los límites de la celda de Voronoi!', 'sys');
       } else if (line.startsWith('NAV:AVOID_DECISION')) {
         radarAudio.playObstacleAlert();
         setObstaclesAvoidedCount((c) => c + 1);
@@ -1159,7 +1218,7 @@ export function useWorldDiscoverer() {
           spread: 80,
           origin: { y: 0.6 },
         });
-        addLog('¡META ALCANZADA! El rover llegó al Punto B con éxito.', 'sys');
+        addLog('¡MISIÓN COMPLETADA! El rover completó su recorrido con éxito.', 'sys');
       } else if (line.startsWith('PWM:')) {
         const p = parseInt(line.substring(4).trim(), 10);
         if (!isNaN(p)) {
@@ -1212,9 +1271,9 @@ export function useWorldDiscoverer() {
     setInitialDepartPoint({ x: startX, y: startY });
     esp32Emulator.setPointA(startX, startY);
     esp32Emulator.syncBotPose(botPoseRef.current.x, botPoseRef.current.y, botPoseRef.current.heading);
-    sendSerialCommand('NAV_TO_B');
-    addLog(`Navegación Autónoma iniciada desde la posición del Bot A(${startX}, ${startY}) hacia B(${pointB.x}, ${pointB.y}).`, 'sys');
-  }, [pointB.x, pointB.y, sendSerialCommand, addLog]);
+    sendSerialCommand('AUTO:START');
+    addLog(`Navegación Autónoma iniciada con Reconocimiento Inteligente de Obstáculos en ESP32 desde (${startX}, ${startY}).`, 'sys');
+  }, [sendSerialCommand, addLog]);
 
   const handlePauseNavigation = useCallback(() => {
     setIsNavigating(false);
@@ -1243,6 +1302,50 @@ export function useWorldDiscoverer() {
     addLog('Navegación reiniciada: Punto A vinculado a la posición actual del bot.', 'sys');
   }, [sendSerialCommand, addLog]);
 
+  // Optimize Route with AI
+  const handleOptimizeRouteWithAI = useCallback(async (selectedMode?: 'balanced' | 'min_turns' | 'min_distance') => {
+    const mode = selectedMode || optimizationMode;
+    setOptimizationMode(mode);
+    setIsOptimizingWithAI(true);
+    addLog(`Iniciando optimización de ruta por IA (Modo: ${mode}). Analizando topología y evaluando iteraciones...`, 'sys');
+
+    try {
+      const result = await optimizeRouteWithGemini({
+        pointA,
+        pointB,
+        initialHeading: botPoseRef.current.heading,
+        obstacles: dynamicObstacles,
+        mode,
+      });
+
+      setAiOptimizationResult(result);
+      addLog(`IA completó optimización: Algoritmo "${result.algorithmUsed}" (${result.iterationsCount} iteraciones). Distancia: ${result.totalDistanceCm}cm, Giro: ${result.totalTurnDeg}°.`, 'sys');
+      sendSerialCommand(`AI:OPTIMIZED,ALGO=${result.algorithmUsed.substring(0, 18)},ITERS=${result.iterationsCount},DIST=${result.totalDistanceCm},TURNS=${result.totalTurnDeg}`);
+    } catch (err: any) {
+      addLog(`Error en optimización de ruta: ${err?.message || 'Fallo desconocido'}`, 'sys');
+    } finally {
+      setIsOptimizingWithAI(false);
+    }
+  }, [pointA, pointB, dynamicObstacles, optimizationMode, addLog, sendSerialCommand]);
+
+  // Execute AI Optimal Route on ESP32
+  const handleExecuteAIOptimalRoute = useCallback(() => {
+    if (!aiOptimizationResult || aiOptimizationResult.waypoints.length < 2) {
+      addLog('No hay ruta óptima generada para ejecutar. Calcula una ruta con IA primero.', 'sys');
+      return;
+    }
+
+    setNavAlgorithm('ai_optimal');
+    esp32Emulator.setAIWaypoints(
+      aiOptimizationResult.waypoints,
+      aiOptimizationResult.algorithmUsed,
+      aiOptimizationResult.iterationsCount
+    );
+
+    handleStartNavigation();
+    addLog(`Ejecutando en ESP32 la ruta óptima calculada por IA (${aiOptimizationResult.waypoints.length} waypoints, ${aiOptimizationResult.iterationsCount} iteraciones).`, 'sys');
+  }, [aiOptimizationResult, handleStartNavigation, addLog]);
+
   const handleAddDynamicObstacle = useCallback((x: number, y: number, radius: number = 18) => {
     esp32Emulator.addDynamicObstacle(x, y, radius);
     setDynamicObstacles([...esp32Emulator.getDynamicObstacles()]);
@@ -1263,41 +1366,104 @@ export function useWorldDiscoverer() {
 
   const handleSpawnObstaclesPreset = useCallback((type: 'center' | 'zigzag' | 'scatter') => {
     esp32Emulator.clearDynamicObstacles();
-    const a = pointA;
-    const b = pointB;
+    const centroid = voronoiResult.assignedCentroid;
 
     if (type === 'center') {
-      const midX = (a.x + b.x) / 2;
-      const midY = (a.y + b.y) / 2;
-      esp32Emulator.addDynamicObstacle(midX, midY, 24, 'Bloque Central');
+      esp32Emulator.addDynamicObstacle(centroid.x, centroid.y + 40, 24, 'Bloque Central');
+      esp32Emulator.addDynamicObstacle(centroid.x - 50, centroid.y - 30, 20, 'Columna Oeste');
     } else if (type === 'zigzag') {
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      esp32Emulator.addDynamicObstacle(a.x + dx * 0.3 - 35, a.y + dy * 0.3, 18, 'Pilar Oeste');
-      esp32Emulator.addDynamicObstacle(a.x + dx * 0.6 + 35, a.y + dy * 0.6, 20, 'Pilar Este');
+      esp32Emulator.addDynamicObstacle(-40, 90, 18, 'Pilar Oeste');
+      esp32Emulator.addDynamicObstacle(40, 140, 20, 'Pilar Este');
+      esp32Emulator.addDynamicObstacle(-30, 210, 22, 'Pilar Norte');
     } else if (type === 'scatter') {
-      esp32Emulator.spawnRandomObstaclesBetweenAandB(4);
+      const randomSeeds = [
+        { x: -70, y: 80, r: 16, l: 'Obs A' },
+        { x: 65, y: 110, r: 18, l: 'Obs B' },
+        { x: -30, y: 160, r: 20, l: 'Obs C' },
+        { x: 50, y: 220, r: 17, l: 'Obs D' },
+      ];
+      randomSeeds.forEach((s) => esp32Emulator.addDynamicObstacle(s.x, s.y, s.r, s.l));
     }
 
     setDynamicObstacles([...esp32Emulator.getDynamicObstacles()]);
-    addLog(`Escenario de obstáculos "${type}" cargado.`, 'sys');
-  }, [pointA, pointB, addLog]);
+    addLog(`Escenario de obstáculos "${type}" cargado para prueba de evasión en ESP32.`, 'sys');
+  }, [voronoiResult.assignedCentroid, addLog]);
+
+  // Run Voronoi Partition, Lloyd's relaxation with min 5m distance between points, simulate RS232 packet and begin transit + spiral
+  const handleRunVoronoiAndSpiral = useCallback((customConfig?: Partial<ArchimedeanSpiralConfig>) => {
+    const updatedVoronoi = generateVoronoiWithLloyd(
+      { minX: -600, maxX: 600, minY: -100, maxY: 1100 },
+      undefined,
+      8,
+      0,
+      500 // Min 5.0m distance constraint between Voronoi points
+    );
+    setVoronoiResult(updatedVoronoi);
+
+    const assignedCell =
+      updatedVoronoi.cells.find((c) => c.isAssigned) || updatedVoronoi.cells[0];
+    const cellInradius = computeCellMaxInradius(updatedVoronoi.assignedCentroid, assignedCell.polygon);
+    const safeMaxRadius = Math.min(
+      customConfig?.maxRadiusCm ?? spiralConfig.maxRadiusCm,
+      Math.max(15, Math.floor(cellInradius - 15))
+    );
+
+    const activeConfig: ArchimedeanSpiralConfig = {
+      ...spiralConfig,
+      ...(customConfig || {}),
+      center: updatedVoronoi.assignedCentroid,
+      maxRadiusCm: safeMaxRadius,
+      boundaryPolygon: assignedCell.polygon,
+    };
+    setSpiralConfig(activeConfig);
+
+    setNavAlgorithm('voronoi_lloyd_spiral');
+    setIsNavigating(true);
+    setIsAutonomous(true);
+    setGoalReached(false);
+
+    // Feed to emulated ESP32 with cell boundary polygon constraint
+    esp32Emulator.startVoronoiAndSpiral(updatedVoronoi.assignedCentroid, activeConfig, assignedCell.polygon);
+
+    // Emulate RS232 transmission
+    setRs232Logs((prev) => [updatedVoronoi.rawRS232Packet, ...prev.slice(0, 20)]);
+    addLog(`[RS232 RX] Partición Voronoi recibida (distancia mín entre puntos: ${(updatedVoronoi.minPointDistanceCm / 100).toFixed(2)}m ≥ 5.0m). Celda #${updatedVoronoi.assignedCellId}, Centroide=(${updatedVoronoi.assignedCentroid.x}, ${updatedVoronoi.assignedCentroid.y})cm.`, 'in');
+    addLog(`ESP32: Navegación iniciada al centro del punto Voronoi. Al llegar al centro exacto comenzará la Espiral de Arquímedes confinada estrictamente a la partición celular (R_max=${safeMaxRadius}cm, margen seg: 15cm).`, 'sys');
+    sendSerialCommand(updatedVoronoi.rawRS232Packet);
+  }, [spiralConfig, addLog, sendSerialCommand]);
+
+  const handleUpdateSpiralConfig = useCallback((newConf: Partial<ArchimedeanSpiralConfig>) => {
+    setSpiralConfig((prev) => {
+      const merged = { ...prev, ...newConf };
+      esp32Emulator.setSpiralConfig(merged);
+      return merged;
+    });
+    addLog(`Parámetros de Espiral actualizados (Paso: ${newConf.pitchCm ?? spiralConfig.pitchCm}cm, R_Max: ${newConf.maxRadiusCm ?? spiralConfig.maxRadiusCm}cm).`, 'sys');
+  }, [spiralConfig.pitchCm, spiralConfig.maxRadiusCm, addLog]);
+
+  const handleResetSpiralDefaults = useCallback(() => {
+    const def = {
+      ...DEFAULT_SPIRAL_CONFIG,
+      center: voronoiResult.assignedCentroid,
+    };
+    setSpiralConfig(def);
+    esp32Emulator.setSpiralConfig(def);
+    addLog('Parámetros de Espiral de Arquímedes restablecidos a valores por defecto.', 'sys');
+  }, [voronoiResult.assignedCentroid, addLog]);
 
   const handleMapClickCoord = useCallback((worldX: number, worldY: number) => {
-    if (interactionMode === 'set_a') {
-      handleSetPointA(worldX, worldY);
-      setInteractionMode('pan');
-    } else if (interactionMode === 'set_b') {
-      handleSetPointB(worldX, worldY);
-      setInteractionMode('pan');
-    } else if (interactionMode === 'add_obstacle') {
+    if (interactionMode === 'add_obstacle') {
       handleAddDynamicObstacle(worldX, worldY, 18);
       setInteractionMode('pan');
+    } else if (interactionMode === 'set_voronoi_center') {
+      handleUpdateSpiralConfig({ center: { x: worldX, y: worldY } });
+      setInteractionMode('pan');
     }
-  }, [interactionMode, handleSetPointA, handleSetPointB, handleAddDynamicObstacle]);
+  }, [interactionMode, handleAddDynamicObstacle, handleUpdateSpiralConfig]);
 
-  const straightLineDistanceCm = Math.hypot(pointB.x - pointA.x, pointB.y - pointA.y);
-  const distanceToGoalCm = Math.hypot(pointB.x - botPose.x, pointB.y - botPose.y);
+  const spState = esp32Emulator.getSpiralState();
+  const straightLineDistanceCm = Math.hypot(voronoiResult.assignedCentroid.x - pointA.x, voronoiResult.assignedCentroid.y - pointA.y);
+  const distanceToGoalCm = Math.hypot(voronoiResult.assignedCentroid.x - botPose.x, voronoiResult.assignedCentroid.y - botPose.y);
   const actualDistanceTraveledCm = botPose.totalDistanceCm;
   const efficiencyPercentage =
     actualDistanceTraveledCm > 0
@@ -1306,7 +1472,8 @@ export function useWorldDiscoverer() {
 
   const navigationRouteStats: NavigationRouteStats = {
     pointA,
-    pointB,
+    pointB: voronoiResult.assignedCentroid,
+    targetCentroid: voronoiResult.assignedCentroid,
     distanceToGoalCm,
     straightLineDistanceCm,
     actualDistanceTraveledCm,
@@ -1316,6 +1483,12 @@ export function useWorldDiscoverer() {
     algorithm: navAlgorithm,
     isNavigating,
     goalReached,
+    aiOptimizedResult: aiOptimizationResult,
+    spiralCurrentRadiusCm: spState.currentRadiusCm,
+    spiralTurnsCompleted: spState.turnsCompleted,
+    spiralMaxRadiusCm: spiralConfig.maxRadiusCm,
+    voronoiCellId: voronoiResult.assignedCellId,
+    rs232Status: rs232Logs[0] || 'RS232_PORT_OPEN_115200',
   };
 
   const totalDistM = Number((botPose.totalDistanceCm / 100).toFixed(2));
@@ -1418,5 +1591,23 @@ export function useWorldDiscoverer() {
     handleClearDynamicObstacles,
     handleSpawnObstaclesPreset,
     handleMapClickCoord,
+    // AI Route Optimizer
+    aiOptimizationResult,
+    isOptimizingWithAI,
+    optimizationMode,
+    setOptimizationMode,
+    showCandidateIterations,
+    setShowCandidateIterations,
+    handleOptimizeRouteWithAI,
+    handleExecuteAIOptimalRoute,
+    // Voronoi Partitioning & Archimedean Spiral (RS232)
+    voronoiResult,
+    spiralConfig,
+    spiralPreviewPoints,
+    recognizedObstacles,
+    rs232Logs,
+    handleRunVoronoiAndSpiral,
+    handleUpdateSpiralConfig,
+    handleResetSpiralDefaults,
   };
 }

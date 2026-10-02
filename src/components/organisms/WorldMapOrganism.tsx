@@ -9,7 +9,12 @@ import {
   MapEnvironmentPreset,
   DynamicObstacle,
   MapInteractionMode,
+  RecognizedObstacle,
 } from '../../types/worldDiscoverer';
+import {
+  VoronoiLloydResult,
+  ArchimedeanSpiralConfig,
+} from '../../utils/voronoiLloyd';
 import { WorldCanvas2D } from '../molecules/WorldCanvas2D';
 import { WorldSimulator3D } from '../molecules/WorldSimulator3D';
 import {
@@ -50,6 +55,11 @@ interface WorldMapOrganismProps {
   dynamicObstacles?: DynamicObstacle[];
   interactionMode?: MapInteractionMode;
   onMapClickCoord?: (worldX: number, worldY: number) => void;
+  aiOptimalPath?: { x: number; y: number }[];
+  candidateIterations?: { iteration: number; points: { x: number; y: number }[]; score?: number; rejectedReason?: string }[];
+  voronoiResult?: VoronoiLloydResult;
+  spiralConfig?: ArchimedeanSpiralConfig;
+  recognizedObstacles?: RecognizedObstacle[];
 }
 
 export const WorldMapOrganism: React.FC<WorldMapOrganismProps> = ({
@@ -76,6 +86,11 @@ export const WorldMapOrganism: React.FC<WorldMapOrganismProps> = ({
   dynamicObstacles,
   interactionMode,
   onMapClickCoord,
+  aiOptimalPath,
+  candidateIterations,
+  voronoiResult,
+  spiralConfig,
+  recognizedObstacles,
 }) => {
   // Default to 3D Gazebo simulation view as requested by user
   const [viewMode, setViewMode] = useState<MainViewMode>('3d');
@@ -212,6 +227,11 @@ export const WorldMapOrganism: React.FC<WorldMapOrganismProps> = ({
             dynamicObstacles={dynamicObstacles}
             interactionMode={interactionMode}
             onMapClickCoord={onMapClickCoord}
+            aiOptimalPath={aiOptimalPath}
+            candidateIterations={candidateIterations}
+            voronoiResult={voronoiResult}
+            spiralConfig={spiralConfig}
+            recognizedObstacles={recognizedObstacles}
           />
         )}
 
@@ -254,6 +274,11 @@ export const WorldMapOrganism: React.FC<WorldMapOrganismProps> = ({
                 dynamicObstacles={dynamicObstacles}
                 interactionMode={interactionMode}
                 onMapClickCoord={onMapClickCoord}
+                aiOptimalPath={aiOptimalPath}
+                candidateIterations={candidateIterations}
+                voronoiResult={voronoiResult}
+                spiralConfig={spiralConfig}
+                recognizedObstacles={recognizedObstacles}
               />
             </div>
           </div>

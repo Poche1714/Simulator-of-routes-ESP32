@@ -7,7 +7,9 @@ import {
   RoverSweepState,
   DiscoveredPoint2D,
   MapEnvironmentPreset,
+  DynamicObstacle,
 } from '../../types/worldDiscoverer';
+import { WORLD_PRESETS } from '../../utils/worldSimulator';
 import { createRover3DModel, updateRover3D, Rover3DInstance } from '../../utils/rover3DModel';
 import {
   Crosshair,
@@ -51,6 +53,7 @@ export interface WorldSimulator3DProps {
   onStopBot: () => void;
   onAddWaypoint: () => void;
   onResetRoute: () => void;
+  dynamicObstacles?: DynamicObstacle[];
 }
 
 export const WorldSimulator3D: React.FC<WorldSimulator3DProps> = ({
@@ -69,6 +72,7 @@ export const WorldSimulator3D: React.FC<WorldSimulator3DProps> = ({
   onStopBot,
   onAddWaypoint,
   onResetRoute,
+  dynamicObstacles = [],
 }) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -97,7 +101,7 @@ export const WorldSimulator3D: React.FC<WorldSimulator3DProps> = ({
     trajectoryLine: THREE.Line;
     trajectoryPositions: Float32Array;
     waypointsGroup: THREE.Group;
-    discoveredWallsGroup: THREE.Group;
+    obstaclesGroup: THREE.Group;
     pointcloudPoints: THREE.Points;
     pointcloudGeo: THREE.BufferGeometry;
     gridHelper: THREE.GridHelper;
@@ -256,11 +260,10 @@ export const WorldSimulator3D: React.FC<WorldSimulator3DProps> = ({
     const waypointsGroup = new THREE.Group();
     scene.add(waypointsGroup);
 
-    // 10. Dynamic Discovered Walls Group (NO PRE-BAKED 3D OBJECTS)
-    // Only walls discovered by the bot's sonar sensor are created here!
-    const discoveredWallsGroup = new THREE.Group();
-    discoveredWallsGroup.name = 'DiscoveredWallsGroup';
-    scene.add(discoveredWallsGroup);
+    // 10. Defined 3D Obstacles Group (Only explicitly defined obstacles, NO random walls)
+    const obstaclesGroup = new THREE.Group();
+    obstaclesGroup.name = 'DefinedObstaclesGroup';
+    scene.add(obstaclesGroup);
 
     // 11. Sonar Pointcloud in 3D
     const MAX_PCD_POINTS = 2000;
@@ -317,7 +320,7 @@ export const WorldSimulator3D: React.FC<WorldSimulator3DProps> = ({
       trajectoryLine,
       trajectoryPositions,
       waypointsGroup,
-      discoveredWallsGroup,
+      obstaclesGroup,
       pointcloudPoints,
       pointcloudGeo,
       gridHelper,
@@ -464,13 +467,13 @@ export const WorldSimulator3D: React.FC<WorldSimulator3DProps> = ({
     };
   }, []);
 
-  // Whenever points change: DYNAMICALLY CREATE 3D WALLS AT EACH DETECTED OBSTACLE POINT!
+  // Rebuild 3D obstacle objects whenever dynamicObstacles or preset changes
   useEffect(() => {
     const state = threeRef.current;
     if (!state) return;
 
-    rebuildDiscoveredWalls(state.discoveredWallsGroup, points);
-  }, [points]);
+    rebuild3DObstacles(state.obstaclesGroup, dynamicObstacles, preset);
+  }, [dynamicObstacles, preset]);
 
   // Whenever trajectory points are added: Clear Fog of War along the bot's travel path
   useEffect(() => {
@@ -692,10 +695,13 @@ export const WorldSimulator3D: React.FC<WorldSimulator3DProps> = ({
     if (!canvasRef.current) return;
     const dataUrl = canvasRef.current.toDataURL('image/png');
     const link = document.createElement('a');
-    link.download = `slam-3d-walls-${Date.now()}.png`;
+    link.download = `sim-3d-obstacles-${Date.now()}.png`;
     link.href = dataUrl;
     link.click();
   }, []);
+
+  const totalDefinedObstacles =
+    (dynamicObstacles?.length || 0) + (WORLD_PRESETS[preset]?.circles?.length || 0);
 
   return (
     <div
@@ -712,14 +718,17 @@ export const WorldSimulator3D: React.FC<WorldSimulator3DProps> = ({
       {/* 3D WebGL Canvas */}
       <canvas ref={canvasRef} className="w-full h-full block cursor-grab active:cursor-grabbing" />
 
-      {/* Top Left: Procedural SLAM Wall Mapping & Fog Status Badge */}
+      {/* Top Left: 3D Simulator & Defined Obstacles Status Badge */}
       <div className="absolute top-3 left-3 flex flex-col gap-1.5 pointer-events-none z-10">
         <div className="flex items-center gap-2 bg-neutral-900/90 backdrop-blur-md px-3 py-1.5 rounded-lg border border-neutral-700/80 shadow-lg pointer-events-auto">
-          <div className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
+          <div className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
           <span className="text-xs font-bold tracking-wide text-neutral-100 flex items-center gap-1.5 font-mono">
-            <span>SLAM 3D PROCEDURAL</span>
+            <span>SIMULADOR 3D</span>
+            <span className="text-amber-300 text-[10px] bg-amber-500/20 px-1.5 py-0.5 rounded border border-amber-500/30">
+              OBSTÁCULOS: {totalDefinedObstacles}
+            </span>
             <span className="text-cyan-300 text-[10px] bg-cyan-500/20 px-1.5 py-0.5 rounded border border-cyan-500/30">
-              PAREDES DESCUBIERTAS: {points.length}
+              ECOS SONAR: {points.length}
             </span>
           </span>
           <span className="text-neutral-500 text-xs">|</span>
@@ -1020,120 +1029,142 @@ export const WorldSimulator3D: React.FC<WorldSimulator3DProps> = ({
 };
 
 /**
- * Procedural 3D Wall Generation:
- * Automatically builds 3D wall blocks and connecting wall slabs wherever the sonar sensor detects an obstacle!
- * No static pre-baked objects are shown.
+ * 3D Obstacle Objects Generation:
+ * Renders ONLY the physical objects explicitly defined as obstacles (preset circles & dynamic obstacles).
+ * Procedural/random walls and connecting wall slabs have been completely removed.
  */
-function rebuildDiscoveredWalls(group: THREE.Group, points: DiscoveredPoint2D[]) {
-  // Clear old dynamic wall meshes
+function rebuild3DObstacles(
+  group: THREE.Group,
+  dynamicObstacles: DynamicObstacle[] = [],
+  preset: MapEnvironmentPreset = 'dungeon_chamber'
+) {
+  // Clear old obstacle meshes
   while (group.children.length > 0) {
     const child = group.children[0];
     if ((child as any).geometry) {
       (child as any).geometry.dispose();
     }
+    if ((child as any).material) {
+      if (Array.isArray((child as any).material)) {
+        (child as any).material.forEach((m: any) => m.dispose());
+      } else {
+        (child as any).material.dispose();
+      }
+    }
     group.remove(child);
   }
 
-  // REGLA ESTRICTA: Solo pintar paredes si la distancia es MENOR a 70 cm (< 70 cm)
-  const validPoints = points.filter((p) => p.distanceCm < 70.0);
-  if (validPoints.length === 0) return;
+  // Collect all explicitly defined obstacles:
+  // 1. Preset circular obstacles for current environment
+  const layout = WORLD_PRESETS[preset] || WORLD_PRESETS.dungeon_chamber;
+  const allObstacles: Array<{
+    x: number;
+    y: number;
+    radius: number;
+    label?: string;
+    isDynamic?: boolean;
+  }> = [];
 
-  const wallHeight = 0.75; // 75 cm wall height
-  const wallWidth = 0.22; // 22 cm wall thickness
+  if (layout && layout.circles) {
+    layout.circles.forEach((c, idx) => {
+      allObstacles.push({
+        x: c.cx,
+        y: c.cy,
+        radius: c.radius,
+        label: `Obstáculo ${idx + 1}`,
+        isDynamic: false,
+      });
+    });
+  }
 
-  const wallMatNormal = new THREE.MeshStandardMaterial({
-    color: 0x334155, // Dark slate concrete barrier
-    roughness: 0.55,
-    metalness: 0.35,
-  });
+  // 2. Dynamic obstacles added by user or algorithm
+  if (dynamicObstacles && dynamicObstacles.length > 0) {
+    dynamicObstacles.forEach((obs) => {
+      allObstacles.push({
+        x: obs.x,
+        y: obs.y,
+        radius: obs.radius,
+        label: obs.label || 'Obstáculo',
+        isDynamic: true,
+      });
+    });
+  }
 
-  const wallMatCloseAlert = new THREE.MeshStandardMaterial({
-    color: 0x4c1d24, // Red tinted barrier
+  if (allObstacles.length === 0) return;
+
+  const obstacleHeight = 0.85; // 85 cm tall cylindrical obstacle column
+
+  // Materials for defined obstacles
+  const bodyMaterialStatic = new THREE.MeshStandardMaterial({
+    color: 0x27272a, // Industrial dark steel
     roughness: 0.45,
-    metalness: 0.4,
+    metalness: 0.65,
   });
 
-  const topRimMatCyan = new THREE.MeshStandardMaterial({
+  const bodyMaterialDynamic = new THREE.MeshStandardMaterial({
+    color: 0x3f3f46, // Dark slate
+    roughness: 0.4,
+    metalness: 0.5,
+  });
+
+  const hazardRimAmber = new THREE.MeshStandardMaterial({
+    color: 0xf59e0b,
+    emissive: 0xd97706,
+    emissiveIntensity: 0.8,
+    roughness: 0.3,
+  });
+
+  const hazardRimCyan = new THREE.MeshStandardMaterial({
     color: 0x06b6d4,
     emissive: 0x0891b2,
-    emissiveIntensity: 0.7,
-  });
-
-  const topRimMatRose = new THREE.MeshStandardMaterial({
-    color: 0xf43f5e,
-    emissive: 0xe11d48,
     emissiveIntensity: 0.8,
+    roughness: 0.3,
   });
 
-  // 1. Spawn a 3D wall block at each detected obstacle point (< 70 cm)
-  validPoints.forEach((p) => {
-    const wx = p.worldX / 100;
-    const wz = -p.worldY / 100;
-    const isClose = p.distanceCm <= 40;
-
-    const blockGroup = new THREE.Group();
-    blockGroup.position.set(wx, 0, wz);
-
-    // Wall pillar block
-    const blockGeo = new THREE.BoxGeometry(wallWidth, wallHeight, wallWidth);
-    const blockMesh = new THREE.Mesh(blockGeo, isClose ? wallMatCloseAlert : wallMatNormal);
-    blockMesh.position.y = wallHeight / 2;
-    blockMesh.castShadow = true;
-    blockMesh.receiveShadow = true;
-    blockGroup.add(blockMesh);
-
-    // Glowing top rim cap
-    const capGeo = new THREE.BoxGeometry(wallWidth * 1.05, 0.04, wallWidth * 1.05);
-    const capMesh = new THREE.Mesh(capGeo, isClose ? topRimMatRose : topRimMatCyan);
-    capMesh.position.y = wallHeight + 0.02;
-    blockGroup.add(capMesh);
-
-    group.add(blockGroup);
+  const clearanceMat = new THREE.MeshBasicMaterial({
+    color: 0xf59e0b,
+    transparent: true,
+    opacity: 0.22,
+    side: THREE.DoubleSide,
   });
 
-  // 2. Connect adjacent detected obstacle points with continuous 3D wall slabs (< 35 cm apart)
-  const connectedPairs = new Set<string>();
-  for (let i = 0; i < validPoints.length; i++) {
-    const p1 = validPoints[i];
-    const x1 = p1.worldX / 100;
-    const z1 = -p1.worldY / 100;
+  allObstacles.forEach((obs) => {
+    const wx = obs.x / 100;
+    const wz = -obs.y / 100;
+    const radM = Math.max(0.08, obs.radius / 100);
 
-    for (let j = i + 1; j < Math.min(i + 12, validPoints.length); j++) {
-      const p2 = validPoints[j];
-      const x2 = p2.worldX / 100;
-      const z2 = -p2.worldY / 100;
+    const obsGroup = new THREE.Group();
+    obsGroup.position.set(wx, 0, wz);
 
-      const distM = Math.hypot(x2 - x1, z2 - z1);
-      if (distM > 0.04 && distM < 0.35) {
-        const pairKey = i < j ? `${i}-${j}` : `${j}-${i}`;
-        if (connectedPairs.has(pairKey)) continue;
-        connectedPairs.add(pairKey);
+    // 1. Main cylindrical column body
+    const colGeo = new THREE.CylinderGeometry(radM, radM * 1.02, obstacleHeight, 28);
+    const colMesh = new THREE.Mesh(colGeo, obs.isDynamic ? bodyMaterialDynamic : bodyMaterialStatic);
+    colMesh.position.y = obstacleHeight / 2;
+    colMesh.castShadow = true;
+    colMesh.receiveShadow = true;
+    obsGroup.add(colMesh);
 
-        const dx = x2 - x1;
-        const dz = z2 - z1;
-        const angle = Math.atan2(dz, dx);
-        const midX = (x1 + x2) / 2;
-        const midZ = (z1 + z2) / 2;
+    // 2. High-visibility warning collar ring
+    const collarGeo = new THREE.CylinderGeometry(radM * 1.04, radM * 1.04, 0.12, 28);
+    const collarMesh = new THREE.Mesh(collarGeo, obs.isDynamic ? hazardRimAmber : hazardRimCyan);
+    collarMesh.position.y = obstacleHeight * 0.7;
+    obsGroup.add(collarMesh);
 
-        const isClose = p1.distanceCm <= 40 || p2.distanceCm <= 40;
+    // 3. Top cap with beveled rim
+    const topCapGeo = new THREE.CylinderGeometry(radM * 1.02, radM * 1.02, 0.04, 28);
+    const topCapMesh = new THREE.Mesh(topCapGeo, obs.isDynamic ? hazardRimAmber : hazardRimCyan);
+    topCapMesh.position.y = obstacleHeight + 0.02;
+    obsGroup.add(topCapMesh);
 
-        const slabGeo = new THREE.BoxGeometry(distM, wallHeight, wallWidth * 0.85);
-        const slabMesh = new THREE.Mesh(slabGeo, isClose ? wallMatCloseAlert : wallMatNormal);
-        slabMesh.position.set(midX, wallHeight / 2, midZ);
-        slabMesh.rotation.y = -angle;
-        slabMesh.castShadow = true;
-        slabMesh.receiveShadow = true;
-        group.add(slabMesh);
+    // 4. Ground safety clearance ring
+    const groundRingGeo = new THREE.RingGeometry(radM * 1.05, radM * 1.28, 28);
+    const groundRingMesh = new THREE.Mesh(groundRingGeo, clearanceMat);
+    groundRingMesh.rotation.x = -Math.PI / 2;
+    groundRingMesh.position.y = 0.005;
+    obsGroup.add(groundRingMesh);
 
-        // Glowing top rim for connecting slab
-        const slabCapGeo = new THREE.BoxGeometry(distM, 0.03, wallWidth * 0.88);
-        const slabCapMesh = new THREE.Mesh(slabCapGeo, isClose ? topRimMatRose : topRimMatCyan);
-        slabCapMesh.position.set(midX, wallHeight + 0.015, midZ);
-        slabCapMesh.rotation.y = -angle;
-        group.add(slabCapMesh);
-      }
-    }
-  }
+    group.add(obsGroup);
+  });
 }
 
 /**

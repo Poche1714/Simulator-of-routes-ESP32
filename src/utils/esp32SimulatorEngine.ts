@@ -2,8 +2,21 @@
 // Emulates the exact ESP32 C++ runtime: GPIOs, PWM channels, HC-SR04 ultrasonic raycaster,
 // servo motor mechanics, UART serial communication, and autonomous Point A to Point B navigation algorithms.
 
-import { MapEnvironmentPreset } from '../types/worldDiscoverer';
+import {
+  MapEnvironmentPreset,
+  NavAlgorithmMode,
+  NavState,
+  RecognizedObstacle,
+} from '../types/worldDiscoverer';
 import { WORLD_PRESETS } from './worldSimulator';
+import {
+  ArchimedeanSpiralConfig,
+  DEFAULT_SPIRAL_CONFIG,
+  Point2D,
+  isPointInsidePolygon,
+  computeCellMaxInradius,
+  distToPolygonBoundary,
+} from './voronoiLloyd';
 
 export interface DynamicObstacle {
   id: string;
@@ -13,20 +26,6 @@ export interface DynamicObstacle {
   label?: string;
   color?: string;
 }
-
-export type NavAlgorithmMode = 'tangent_bug' | 'reactive_sonar' | 'potential_field';
-
-export type NavState =
-  | 'IDLE'
-  | 'ORIENTING'
-  | 'CRUISING'
-  | 'PROBING_WIDE'
-  | 'AVOIDING_LEFT'
-  | 'AVOIDING_RIGHT'
-  | 'REVERSING_ESCAPE'
-  | 'REJOINING_GOAL'
-  | 'GOAL_REACHED'
-  | 'BLOCKED';
 
 export interface ESP32HardwareState {
   // Emulated CPU
@@ -61,10 +60,11 @@ export interface ESP32HardwareState {
     heading: number; // 0-360, 90 is North (+Y)
   };
 
-  // A to B Navigation state inside ESP32
+  // Autonomous Navigation & Voronoi-Lloyd-Spiral state inside ESP32
   navigation: {
     pointA: { x: number; y: number };
     pointB: { x: number; y: number };
+    targetCentroid: { x: number; y: number };
     isActive: boolean;
     state: NavState;
     algorithm: NavAlgorithmMode;
@@ -74,6 +74,8 @@ export interface ESP32HardwareState {
     obstaclesAvoidedCount: number;
     currentSpeedCmS: number;
     goalReached: boolean;
+    spiralCurrentRadiusCm?: number;
+    spiralTurnsCompleted?: number;
   };
 }
 
@@ -91,10 +93,25 @@ export class ESP32SimulatorEngine {
   private probeStep: number = 0;
   private reverseTicksRemaining: number = 0;
   private escapePivotDeg: number = 0;
+  private aiWaypoints: { x: number; y: number }[] = [];
+  private currentWaypointIndex: number = 0;
+
+  // Intelligent Obstacle Recognition System
+  private recognizedObstacles: Map<string, RecognizedObstacle> = new Map();
+
+  // Voronoi Partition & Archimedean Spiral Engine
+  private spiralConfig: ArchimedeanSpiralConfig = DEFAULT_SPIRAL_CONFIG;
+  private spiralThetaRad: number = 0;
+  private spiralCurrentRadiusCm: number = 5;
+  private spiralTurnsCompleted: number = 0;
+  private targetCentroid: { x: number; y: number } = { x: 0, y: 150 };
+  private boundaryPolygon: Point2D[] = [];
+  private rs232LastPacket: string = '';
+  private centerArrivalTicks: number = 0;
 
   constructor() {
     const defaultStart = { x: -120, y: 50, heading: 90 };
-    const defaultGoal = { x: 120, y: 280 };
+    const defaultGoal = { x: 0, y: 150 };
 
     this.state = {
       isRunning: true,
@@ -124,15 +141,18 @@ export class ESP32SimulatorEngine {
       navigation: {
         pointA: { x: defaultStart.x, y: defaultStart.y },
         pointB: { x: defaultGoal.x, y: defaultGoal.y },
+        targetCentroid: { x: defaultGoal.x, y: defaultGoal.y },
         isActive: false,
         state: 'IDLE',
-        algorithm: 'tangent_bug',
+        algorithm: 'voronoi_lloyd_spiral',
         distanceToGoalCm: Math.hypot(defaultGoal.x - defaultStart.x, defaultGoal.y - defaultStart.y),
         initialDistanceCm: Math.hypot(defaultGoal.x - defaultStart.x, defaultGoal.y - defaultStart.y),
         detourDistanceCm: 0,
         obstaclesAvoidedCount: 0,
         currentSpeedCmS: 0,
         goalReached: false,
+        spiralCurrentRadiusCm: 5,
+        spiralTurnsCompleted: 0,
       },
     };
 
@@ -225,15 +245,20 @@ export class ESP32SimulatorEngine {
           this.setPointB(x, y);
         }
       }
-    } else if (upper === 'NAV_TO_B' || upper === 'NAV:START') {
-      this.startNavigationToB();
-    } else if (upper === 'NAV:STOP' || upper === 'NAV:PAUSE') {
+    } else if (upper === 'NAV_TO_B' || upper === 'NAV:START' || upper === 'AUTO:START') {
+      this.startAutonomousNavigation();
+    } else if (upper.startsWith('VORONOI:START') || upper.startsWith('RS232:RX,[VORONOI')) {
+      // Execute Voronoi & Archimedean spiral
+      const cx = this.targetCentroid?.x ?? 0;
+      const cy = this.targetCentroid?.y ?? 150;
+      this.startVoronoiAndSpiral({ x: cx, y: cy });
+    } else if (upper === 'NAV:STOP' || upper === 'NAV:PAUSE' || upper === 'AUTO:STOP') {
       this.pauseNavigation();
     } else if (upper === 'NAV:RESET') {
       this.resetToPointA();
     } else if (upper.startsWith('SET_ALGO:')) {
       const algo = cmd.substring(9).trim().toLowerCase() as NavAlgorithmMode;
-      if (['tangent_bug', 'reactive_sonar', 'potential_field'].includes(algo)) {
+      if (['voronoi_lloyd_spiral', 'tangent_bug', 'reactive_sonar', 'potential_field'].includes(algo)) {
         this.state.navigation.algorithm = algo;
         this.emitSerial(`ALGO:SET,${algo}`);
       }
@@ -389,18 +414,120 @@ export class ESP32SimulatorEngine {
     this.updateGoalDistance();
   }
 
-  public startNavigationToB() {
+  public setAIWaypoints(waypoints: { x: number; y: number }[], algoName = 'Hybrid A* Kinematic', iters = 184) {
+    this.aiWaypoints = waypoints.map((w) => ({ x: Number(w.x.toFixed(1)), y: Number(w.y.toFixed(1)) }));
+    this.currentWaypointIndex = 0;
+    this.state.navigation.algorithm = 'ai_optimal';
+    this.emitSerial(`AI:PLAN_LOADED,ALGO=${algoName},ITERS=${iters},WAYPOINTS=${waypoints.length}`);
+    this.emitSerial(`SYS:OPTIMAL_PATH_ENGAGED,MIN_TURNS=TRUE`);
+  }
+
+  public clearAIWaypoints() {
+    this.aiWaypoints = [];
+    this.currentWaypointIndex = 0;
+    if (this.state.navigation.algorithm === 'ai_optimal') {
+      this.state.navigation.algorithm = 'tangent_bug';
+    }
+  }
+
+  public getAIWaypoints() {
+    return this.aiWaypoints;
+  }
+
+  public getCurrentWaypointIndex() {
+    return this.currentWaypointIndex;
+  }
+
+  public setSpiralConfig(config: Partial<ArchimedeanSpiralConfig>) {
+    this.spiralConfig = { ...this.spiralConfig, ...config };
+  }
+
+  public getSpiralConfig(): ArchimedeanSpiralConfig {
+    return this.spiralConfig;
+  }
+
+  public getSpiralState() {
+    return {
+      currentRadiusCm: this.spiralCurrentRadiusCm,
+      currentThetaRad: this.spiralThetaRad,
+      turnsCompleted: this.spiralTurnsCompleted,
+      maxRadiusCm: this.spiralConfig.maxRadiusCm,
+      center: this.targetCentroid,
+      isActive: this.state.navigation.state === 'EXECUTING_SPIRAL',
+      isComplete: this.state.navigation.state === 'SPIRAL_COMPLETE',
+    };
+  }
+
+  public getRecognizedObstacles(): RecognizedObstacle[] {
+    return Array.from(this.recognizedObstacles.values());
+  }
+
+  public clearRecognizedObstacles() {
+    this.recognizedObstacles.clear();
+  }
+
+  public startVoronoiAndSpiral(
+    centroid: { x: number; y: number },
+    customSpiralConfig?: Partial<ArchimedeanSpiralConfig>,
+    boundaryPolygon?: Point2D[]
+  ) {
     this.state.isRunning = true;
     this.state.navigation.isActive = true;
-    this.state.navigation.state = 'ORIENTING';
+    this.state.navigation.algorithm = 'voronoi_lloyd_spiral';
+    this.state.navigation.state = 'MOVING_TO_CENTROID';
+    this.targetCentroid = { ...centroid };
+    this.state.navigation.targetCentroid = { ...centroid };
+    this.state.navigation.pointB = { ...centroid };
+
+    this.boundaryPolygon = boundaryPolygon || customSpiralConfig?.boundaryPolygon || [];
+
+    // Calculate maximum allowable radius within the Voronoi partition with safety margin (15 cm)
+    let maxSafeRadius = 140;
+    if (this.boundaryPolygon && this.boundaryPolygon.length >= 3) {
+      const inradius = computeCellMaxInradius(centroid, this.boundaryPolygon);
+      maxSafeRadius = Math.max(15, Math.floor(inradius - 15));
+    }
+
+    if (customSpiralConfig) {
+      this.spiralConfig = {
+        ...this.spiralConfig,
+        ...customSpiralConfig,
+        center: centroid,
+        maxRadiusCm: Math.min(customSpiralConfig.maxRadiusCm ?? 140, maxSafeRadius),
+        boundaryPolygon: this.boundaryPolygon,
+      };
+    } else {
+      this.spiralConfig.center = centroid;
+      this.spiralConfig.maxRadiusCm = Math.min(this.spiralConfig.maxRadiusCm, maxSafeRadius);
+      this.spiralConfig.boundaryPolygon = this.boundaryPolygon;
+    }
+
+    this.spiralThetaRad = 0;
+    this.spiralCurrentRadiusCm = Math.max(0, this.spiralConfig.a);
+    this.spiralTurnsCompleted = 0;
+    this.centerArrivalTicks = 0;
     this.state.navigation.goalReached = false;
     this.state.navigation.detourDistanceCm = 0;
-    this.state.navigation.pointA = { x: this.state.odometry.x, y: this.state.odometry.y };
-    this.prevPoseForDetour = { x: this.state.odometry.x, y: this.state.odometry.y };
-    this.updateGoalDistance();
-    this.emitSerial(
-      `NAV:START,A=(${this.state.navigation.pointA.x.toFixed(0)},${this.state.navigation.pointA.y.toFixed(0)}),B=(${this.state.navigation.pointB.x.toFixed(0)},${this.state.navigation.pointB.y.toFixed(0)}),ALGO=${this.state.navigation.algorithm}`
-    );
+
+    // Simulate incoming RS232 synchronization packet
+    const rsPacket = `RS232:RX,[VORONOI_LATCH],CENTROID=(${centroid.x.toFixed(1)},${centroid.y.toFixed(1)}),PITCH=${this.spiralConfig.pitchCm}CM,R_MAX=${this.spiralConfig.maxRadiusCm}CM,DIR=${this.spiralConfig.direction}`;
+    this.rs232LastPacket = rsPacket;
+    this.emitSerial(rsPacket);
+    this.emitSerial(`NAV:STATUS,MOVING_TO_CENTROID`);
+    this.emitSerial(`ESP32:TRANSIT_START,TARGET=CENTROID,X=${centroid.x.toFixed(1)},Y=${centroid.y.toFixed(1)}`);
+  }
+
+  public startAutonomousNavigation() {
+    this.state.isRunning = true;
+    this.state.navigation.isActive = true;
+    this.state.navigation.state = 'CRUISING';
+    this.state.navigation.goalReached = false;
+    this.state.navigation.detourDistanceCm = 0;
+    this.emitSerial(`ESP32:AUTO_NAV_START,INTELLIGENT_OBSTACLE_AVOIDANCE`);
+  }
+
+  public startNavigationToB() {
+    this.startAutonomousNavigation();
   }
 
   public pauseNavigation() {
@@ -508,15 +635,8 @@ export class ESP32SimulatorEngine {
 
     let closestDist = 300; // max range
 
-    // 1. Raycast on preset map geometry
+    // 1. Raycast on defined circular obstacles
     const layout = WORLD_PRESETS[this.preset] || WORLD_PRESETS.dungeon_chamber;
-
-    for (const wall of layout.walls) {
-      const dist = this.intersectRayLine(bot.x, bot.y, dx, dy, wall.x1, wall.y1, wall.x2, wall.y2);
-      if (dist !== null && dist < closestDist && dist >= 2) {
-        closestDist = dist;
-      }
-    }
 
     for (const circ of layout.circles) {
       const dist = this.intersectRayCircle(bot.x, bot.y, dx, dy, circ.cx, circ.cy, circ.radius);
@@ -649,6 +769,37 @@ export class ESP32SimulatorEngine {
     this.emitSerial(`PING:${this.state.servoAngle},${distance.toFixed(1)}`);
     this.emitSerial(`DIST:${distance.toFixed(1)}`);
 
+    // Intelligent Obstacle Recognition & Clustering in ESP32 memory
+    if (distance <= 65.0) {
+      const bot = this.state.odometry;
+      const relAngleDeg = this.state.servoAngle - 90;
+      const worldAngleDeg = (bot.heading + relAngleDeg + 360) % 360;
+      const worldAngleRad = (worldAngleDeg * Math.PI) / 180;
+      const obsWorldX = Number((bot.x + distance * Math.cos(worldAngleRad)).toFixed(1));
+      const obsWorldY = Number((bot.y + distance * Math.sin(worldAngleRad)).toFixed(1));
+
+      const threatLevel: 'low' | 'medium' | 'critical' =
+        distance <= 28 ? 'critical' : distance <= 44 ? 'medium' : 'low';
+      const recommendedAction = relAngleDeg >= 0 ? 'steer_right' : 'steer_left';
+
+      const clusterKey = `obs_${Math.round(obsWorldX / 25) * 25}_${Math.round(obsWorldY / 25) * 25}`;
+      this.recognizedObstacles.set(clusterKey, {
+        id: clusterKey,
+        worldX: obsWorldX,
+        worldY: obsWorldY,
+        distanceCm: distance,
+        angleDeg: worldAngleDeg,
+        threatLevel,
+        recommendedAction,
+        lastSeenMillis: this.state.millis,
+      });
+
+      if (this.recognizedObstacles.size > 30) {
+        const oldestKeys = Array.from(this.recognizedObstacles.keys()).slice(0, 5);
+        oldestKeys.forEach((k) => this.recognizedObstacles.delete(k));
+      }
+    }
+
     // Step B: Obstacle trigger evaluation
     if (distance <= OBSTACLE_TRIGGER_CM) {
       if (this.state.scanMode !== 'OBSTACLE_REDUCED_SWEEP' && this.state.scanMode !== 'WIDE_PROBE_SWEEP') {
@@ -692,28 +843,317 @@ export class ESP32SimulatorEngine {
     this.state.gpioPins.pin18_servoPwm = this.state.servoAngle;
   }
 
+  // --- Voronoi Cell Centroid Transit & Archimedean Spiral Execution ---
+  private tickVoronoiSpiralNavigation() {
+    const nav = this.state.navigation;
+    const bot = this.state.odometry;
+
+    // Direct front distance check
+    const frontDist = this.sampleRaycastDistance(90);
+    this.state.lastDistanceCm = frontDist;
+    const isObstacleAhead = frontDist <= 44.0;
+
+    // Critical proximity escape
+    if (frontDist <= 26.0 && nav.state !== 'REVERSING_ESCAPE') {
+      this.stopMotors();
+      nav.state = 'REVERSING_ESCAPE';
+      this.reverseTicksRemaining = 6;
+      this.escapePivotDeg = 40;
+      this.emitSerial(`ESP32:CRITICAL_PROXIMITY,DIST=${frontDist.toFixed(1)}CM,REVERSING`);
+      return;
+    }
+
+    // 1. Transit to Voronoi Cell Centroid
+    if (
+      nav.state === 'MOVING_TO_CENTROID' ||
+      nav.state === 'ORIENTING' ||
+      nav.state === 'CRUISING'
+    ) {
+      const target = this.targetCentroid;
+      const dx = target.x - bot.x;
+      const dy = target.y - bot.y;
+      const distToCentroid = Math.hypot(dx, dy);
+      nav.distanceToGoalCm = distToCentroid;
+
+      // Centroid arrival check:
+      // Must physically arrive AT the center of this Voronoi point before beginning the spiral!
+      if (distToCentroid <= 6.0) {
+        // Docks precisely at the center of this Voronoi point/cell
+        bot.x = target.x;
+        bot.y = target.y;
+        nav.distanceToGoalCm = 0;
+        this.centerArrivalTicks = 4; // Brief centering stabilization pause (200ms)
+        nav.state = 'ARRIVED_AT_CENTER';
+        this.stopMotors();
+        this.emitSerial(`NAV:STATUS,ARRIVED_AT_CENTER`);
+        this.emitSerial(
+          `ESP32:CENTER_REACHED,POINT=(${target.x.toFixed(1)},${target.y.toFixed(1)}),DIST=0.0CM,READY_FOR_SPIRAL`
+        );
+        this.emitSerial(`POS:${bot.x.toFixed(1)},${bot.y.toFixed(1)},${bot.heading.toFixed(1)}`);
+        return;
+      }
+
+      // Check obstacle in transit to centroid
+      if (isObstacleAhead) {
+        const leftDist = this.sampleRaycastDistance(135);
+        const rightDist = this.sampleRaycastDistance(45);
+        this.avoidanceDirection = rightDist >= 42 ? 'right' : leftDist >= 42 ? 'left' : 'right';
+        nav.state = this.avoidanceDirection === 'right' ? 'AVOIDING_RIGHT' : 'AVOIDING_LEFT';
+        this.avoidanceTicksRemaining = 10;
+        this.emitSerial(
+          `ESP32:OBSTACLE_AVOIDANCE,DIR=${this.avoidanceDirection.toUpperCase()},CLEAR_R=${rightDist.toFixed(0)},CLEAR_L=${leftDist.toFixed(0)}`
+        );
+        return;
+      }
+
+      // Compute heading to centroid
+      let targetHeading = (Math.atan2(dy, dx) * 180) / Math.PI;
+      if (targetHeading < 0) targetHeading += 360;
+      let headingError = targetHeading - bot.heading;
+      while (headingError > 180) headingError -= 360;
+      while (headingError < -180) headingError += 360;
+
+      if (Math.abs(headingError) > 6.0) {
+        const turnStep = Math.sign(headingError) * Math.min(10.0, Math.abs(headingError));
+        bot.heading = (bot.heading + turnStep + 360) % 360;
+      }
+
+      // Drive forward with deceleration when close to center for high precision docking
+      const speedPwm = distToCentroid < 25 ? Math.max(130, Math.round(this.state.motorPwm * 0.75)) : this.state.motorPwm;
+      this.state.gpioPins.pin25_motorL1 = speedPwm;
+      this.state.gpioPins.pin26_motorL2 = 0;
+      this.state.gpioPins.pin32_motorR1 = speedPwm;
+      this.state.gpioPins.pin33_motorR2 = 0;
+
+      const stepCm = Math.min(3.4, Math.max(1.2, distToCentroid));
+      const rad = (bot.heading * Math.PI) / 180;
+      bot.x += stepCm * Math.cos(rad);
+      bot.y += stepCm * Math.sin(rad);
+      this.emitSerial(`POS:${bot.x.toFixed(1)},${bot.y.toFixed(1)},${bot.heading.toFixed(1)}`);
+      return;
+    }
+
+    // 2. Centering State: Robot is at the exact center of this Voronoi point, preparing spiral
+    if (nav.state === 'ARRIVED_AT_CENTER') {
+      this.stopMotors();
+      this.centerArrivalTicks--;
+      if (this.centerArrivalTicks <= 0) {
+        nav.state = 'EXECUTING_SPIRAL';
+        this.spiralThetaRad = 0;
+        this.spiralCurrentRadiusCm = Math.max(0, this.spiralConfig.a);
+        this.spiralTurnsCompleted = 0;
+        nav.spiralCurrentRadiusCm = Number(this.spiralCurrentRadiusCm.toFixed(1));
+        nav.spiralTurnsCompleted = 0;
+        this.emitSerial(`NAV:STATUS,EXECUTING_SPIRAL`);
+        this.emitSerial(
+          `ESP32:SPIRAL_START_FROM_CENTER,ORIGIN=(${this.targetCentroid.x.toFixed(1)},${this.targetCentroid.y.toFixed(1)}),PITCH=${this.spiralConfig.pitchCm}CM,MAX_R=${this.spiralConfig.maxRadiusCm}CM`
+        );
+      }
+      return;
+    }
+
+    // 3. Executing Archimedean Spiral: r(theta) = a + b * theta
+    // CRITICAL CONSTRAINT: The spiral strictly respects the boundaries of the Voronoi partition.
+    // It will NEVER pass or exceed the limits of the Voronoi cell!
+    if (nav.state === 'EXECUTING_SPIRAL') {
+      const b = this.spiralConfig.pitchCm / (2 * Math.PI);
+      const safetyMarginCm = 15.0; // 15 cm safety perimeter from any Voronoi partition edge
+
+      // Determine inradius limit inside the Voronoi cell polygon with safety clearance
+      let effectiveMaxRadius = this.spiralConfig.maxRadiusCm;
+      if (this.boundaryPolygon && this.boundaryPolygon.length >= 3) {
+        const cellInradius = computeCellMaxInradius(this.targetCentroid, this.boundaryPolygon);
+        effectiveMaxRadius = Math.min(this.spiralConfig.maxRadiusCm, Math.max(12, cellInradius - safetyMarginCm));
+      }
+
+      // Angular increment pacing: constant linear arc velocity along the Archimedean spiral
+      const rCurrent = Math.max(2.0, this.spiralCurrentRadiusCm);
+      const deltaTheta = Math.max(0.02, Math.min(0.35, 3.2 / Math.sqrt(b * b + rCurrent * rCurrent)));
+      const nextTheta = this.spiralThetaRad + deltaTheta;
+      const nextRadius = this.spiralConfig.a + b * nextTheta;
+
+      // Compute next target point on spiral
+      const sign = this.spiralConfig.direction === 'clockwise' ? -1 : 1;
+      const spiralTargetX = this.targetCentroid.x + nextRadius * Math.cos(sign * nextTheta);
+      const spiralTargetY = this.targetCentroid.y + nextRadius * Math.sin(sign * nextTheta);
+      const candidatePoint = { x: spiralTargetX, y: spiralTargetY };
+
+      // Strictly verify if point would exceed the Voronoi cell partition boundary
+      const isInsideVoronoi =
+        this.boundaryPolygon.length < 3 ||
+        isPointInsidePolygon(candidatePoint, this.boundaryPolygon, safetyMarginCm);
+      const distToBoundary =
+        this.boundaryPolygon.length >= 3
+          ? distToPolygonBoundary(candidatePoint, this.boundaryPolygon)
+          : Infinity;
+      const botDistToBoundary =
+        this.boundaryPolygon.length >= 3
+          ? distToPolygonBoundary(bot, this.boundaryPolygon)
+          : Infinity;
+
+      // Check max radius limit OR reaching the Voronoi partition boundary (NEVER CROSS LIMITS)
+      if (
+        nextRadius > effectiveMaxRadius ||
+        !isInsideVoronoi ||
+        distToBoundary < safetyMarginCm ||
+        botDistToBoundary < 12.0
+      ) {
+        nav.state = 'SPIRAL_COMPLETE';
+        nav.goalReached = true;
+        nav.isActive = false;
+        this.stopMotors();
+        this.emitSerial(`NAV:STATUS,SPIRAL_COMPLETE`);
+        this.emitSerial(`NAV:GOAL_REACHED`);
+        this.emitSerial(
+          `ESP32:SPIRAL_COMPLETE,VORONOI_BOUNDARY_REACHED,R=${this.spiralCurrentRadiusCm.toFixed(1)}CM,TURNS=${this.spiralTurnsCompleted},DIST_EDGE=${botDistToBoundary.toFixed(1)}CM`
+        );
+        return;
+      }
+
+      this.spiralThetaRad = nextTheta;
+      this.spiralCurrentRadiusCm = nextRadius;
+      this.spiralTurnsCompleted = Number((this.spiralThetaRad / (2 * Math.PI)).toFixed(2));
+      nav.spiralCurrentRadiusCm = Number(this.spiralCurrentRadiusCm.toFixed(1));
+      nav.spiralTurnsCompleted = this.spiralTurnsCompleted;
+
+      // Check obstacle in front during spiral
+      if (isObstacleAhead) {
+        const leftDist = this.sampleRaycastDistance(135);
+        const rightDist = this.sampleRaycastDistance(45);
+        const steerDir = rightDist >= leftDist ? 1 : -1;
+        bot.heading = (bot.heading + steerDir * 12 + 360) % 360;
+        nav.obstaclesAvoidedCount++;
+        this.emitSerial(
+          `ESP32:SPIRAL_OBSTACLE_BYPASS,DIST=${frontDist.toFixed(1)}CM,STEER=${steerDir > 0 ? 'RIGHT' : 'LEFT'}`
+        );
+      } else {
+        const dx = spiralTargetX - bot.x;
+        const dy = spiralTargetY - bot.y;
+        let spiralHeading = (Math.atan2(dy, dx) * 180) / Math.PI;
+        if (spiralHeading < 0) spiralHeading += 360;
+        let headingError = spiralHeading - bot.heading;
+        while (headingError > 180) headingError -= 360;
+        while (headingError < -180) headingError += 360;
+
+        const turnStep = Math.sign(headingError) * Math.min(14.0, Math.abs(headingError));
+        bot.heading = (bot.heading + turnStep + 360) % 360;
+      }
+
+      // Advance bot along spiral
+      const speedPwm = this.state.motorPwm;
+      this.state.gpioPins.pin25_motorL1 = speedPwm;
+      this.state.gpioPins.pin26_motorL2 = 0;
+      this.state.gpioPins.pin32_motorR1 = speedPwm;
+      this.state.gpioPins.pin33_motorR2 = 0;
+
+      const stepCm = 3.2;
+      const rad = (bot.heading * Math.PI) / 180;
+      const nextX = bot.x + stepCm * Math.cos(rad);
+      const nextY = bot.y + stepCm * Math.sin(rad);
+
+      // Boundary safety guard on the robot body itself
+      if (this.boundaryPolygon.length >= 3) {
+        const nextDistToEdge = distToPolygonBoundary({ x: nextX, y: nextY }, this.boundaryPolygon);
+        if (nextDistToEdge < 11.0) {
+          nav.state = 'SPIRAL_COMPLETE';
+          nav.goalReached = true;
+          nav.isActive = false;
+          this.stopMotors();
+          this.emitSerial(`NAV:STATUS,SPIRAL_COMPLETE`);
+          this.emitSerial(`NAV:GOAL_REACHED`);
+          this.emitSerial(
+            `ESP32:SPIRAL_COMPLETE,PHYSICAL_BOUNDARY_REACHED,R=${this.spiralCurrentRadiusCm.toFixed(1)}CM`
+          );
+          return;
+        }
+      }
+
+      bot.x = nextX;
+      bot.y = nextY;
+
+      // Emit POS update so React hooks update botPose and draw trajectory breadcrumbs in real-time
+      this.emitSerial(`POS:${bot.x.toFixed(1)},${bot.y.toFixed(1)},${bot.heading.toFixed(1)}`);
+      this.emitSerial(
+        `SPIRAL:R=${this.spiralCurrentRadiusCm.toFixed(1)},THETA=${((this.spiralThetaRad * 180) / Math.PI).toFixed(0)},POS=(${bot.x.toFixed(1)},${bot.y.toFixed(1)})`
+      );
+      return;
+    }
+
+    // 3. Evasive manoeuvres in Voronoi/Spiral
+    if (nav.state === 'AVOIDING_RIGHT' || nav.state === 'AVOIDING_LEFT') {
+      const turnDeg = nav.state === 'AVOIDING_RIGHT' ? -12 : 12;
+      bot.heading = (bot.heading + turnDeg + 360) % 360;
+      const speedPwm = this.state.motorPwm;
+      this.state.gpioPins.pin25_motorL1 = speedPwm;
+      this.state.gpioPins.pin26_motorL2 = 0;
+      this.state.gpioPins.pin32_motorR1 = speedPwm;
+      this.state.gpioPins.pin33_motorR2 = 0;
+      const rad = (bot.heading * Math.PI) / 180;
+      bot.x += 2.5 * Math.cos(rad);
+      bot.y += 2.5 * Math.sin(rad);
+
+      this.avoidanceTicksRemaining--;
+      if (this.avoidanceTicksRemaining <= 0) {
+        nav.state = 'MOVING_TO_CENTROID';
+      }
+      return;
+    }
+
+    if (nav.state === 'REVERSING_ESCAPE') {
+      this.driveBackwardPhysical(this.state.motorPwm, 250);
+      this.reverseTicksRemaining--;
+      if (this.reverseTicksRemaining <= 0) {
+        bot.heading = (bot.heading + this.escapePivotDeg + 360) % 360;
+        nav.state = 'MOVING_TO_CENTROID';
+      }
+      return;
+    }
+  }
+
   // --- Autonomous Navigation Algorithm for Point A -> Point B with Obstacle Avoidance ---
   private tickAutonomousNavigation() {
     const nav = this.state.navigation;
     const bot = this.state.odometry;
-    const target = nav.pointB;
 
-    const dx = target.x - bot.x;
-    const dy = target.y - bot.y;
-    const distToGoal = Math.hypot(dx, dy);
-    nav.distanceToGoalCm = distToGoal;
+    if (nav.algorithm === 'voronoi_lloyd_spiral') {
+      this.tickVoronoiSpiralNavigation();
+      return;
+    }
+
+    // AI Waypoint Target Selection
+    const isUsingAI = nav.algorithm === 'ai_optimal' && this.aiWaypoints.length > 0;
+    let target = nav.pointB;
+
+    if (isUsingAI) {
+      const currentWP = this.aiWaypoints[this.currentWaypointIndex];
+      if (currentWP) {
+        target = currentWP;
+        const distToWP = Math.hypot(target.x - bot.x, target.y - bot.y);
+        if (distToWP <= 16.0 && this.currentWaypointIndex < this.aiWaypoints.length - 1) {
+          this.currentWaypointIndex++;
+          this.emitSerial(`AI:WP_ADVANCE,IDX=${this.currentWaypointIndex + 1}/${this.aiWaypoints.length}`);
+          target = this.aiWaypoints[this.currentWaypointIndex];
+        }
+      }
+    }
+
+    const distToFinalGoal = Math.hypot(nav.pointB.x - bot.x, nav.pointB.y - bot.y);
+    nav.distanceToGoalCm = distToFinalGoal;
 
     // Check if goal reached (within 14 cm tolerance radius)
-    if (distToGoal <= 14.0) {
+    if (distToFinalGoal <= 14.0) {
       nav.goalReached = true;
       nav.isActive = false;
       nav.state = 'GOAL_REACHED';
       this.stopMotors();
-      this.emitSerial(`NAV:GOAL_REACHED,DIST_TO_B=${distToGoal.toFixed(1)},TOTAL_DETOUR=${nav.detourDistanceCm.toFixed(1)}`);
+      this.emitSerial(`NAV:GOAL_REACHED,DIST_TO_B=${distToFinalGoal.toFixed(1)},TOTAL_DETOUR=${nav.detourDistanceCm.toFixed(1)}`);
       return;
     }
 
-    // Target heading directly towards Point B
+    const dx = target.x - bot.x;
+    const dy = target.y - bot.y;
+
+    // Target heading directly towards active target (intermediate AI waypoint or Point B)
     let targetHeading = (Math.atan2(dy, dx) * 180) / Math.PI;
     if (targetHeading < 0) targetHeading += 360;
 

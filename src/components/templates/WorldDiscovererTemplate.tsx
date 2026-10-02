@@ -60,16 +60,19 @@ export const WorldDiscovererTemplate: React.FC = () => {
     sendSerialCommand,
     motorPwm,
     setMotorPwm,
-    // Point A & B and Algorithm Simulation (v2.0.0)
-    pointA,
-    pointB,
+    // Voronoi Partitioning, Lloyd Relaxation & Archimedean Spiral (RS232)
+    voronoiResult,
+    spiralConfig,
+    recognizedObstacles,
+    rs232Logs,
+    handleRunVoronoiAndSpiral,
+    handleUpdateSpiralConfig,
+    handleResetSpiralDefaults,
     dynamicObstacles,
     interactionMode,
     setInteractionMode,
     navStats,
     hardwarePins,
-    handleSetPointA,
-    handleSetPointB,
     handleSetAlgorithm,
     handleStartNavigation,
     handlePauseNavigation,
@@ -79,6 +82,9 @@ export const WorldDiscovererTemplate: React.FC = () => {
     handleClearDynamicObstacles,
     handleSpawnObstaclesPreset,
     handleMapClickCoord,
+    // AI Route Optimizer
+    aiOptimizationResult,
+    showCandidateIterations,
   } = useWorldDiscoverer();
 
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -137,14 +143,12 @@ export const WorldDiscovererTemplate: React.FC = () => {
           onToggleMute={toggleMute}
         />
 
-        {/* ESP32 Algorithm & Autonomous Point A -> Point B Obstacle Avoidance Workbench (v2.0.0) */}
+        {/* ESP32 Algorithm: Voronoi Partitioning, Lloyd's Relaxation & Archimedean Spiral Coverage (RS232) */}
         <ESP32AlgorithmWorkbench
           navStats={navStats}
           dynamicObstacles={dynamicObstacles}
           interactionMode={interactionMode}
           onInteractionModeChange={setInteractionMode}
-          onSetPointA={handleSetPointA}
-          onSetPointB={handleSetPointB}
           onSetAlgorithm={handleSetAlgorithm}
           onStartNavigation={handleStartNavigation}
           onPauseNavigation={handlePauseNavigation}
@@ -154,6 +158,13 @@ export const WorldDiscovererTemplate: React.FC = () => {
           onClearObstacles={handleClearDynamicObstacles}
           onSpawnObstaclesPreset={handleSpawnObstaclesPreset}
           hardwarePins={hardwarePins}
+          voronoiResult={voronoiResult}
+          spiralConfig={spiralConfig}
+          recognizedObstacles={recognizedObstacles}
+          rs232Logs={rs232Logs}
+          onRunVoronoiAndSpiral={handleRunVoronoiAndSpiral}
+          onUpdateSpiralConfig={handleUpdateSpiralConfig}
+          onResetSpiralDefaults={handleResetSpiralDefaults}
         />
 
         {/* Core Exploration Viewport Grid: Controls & 2D Map */}
@@ -219,11 +230,14 @@ export const WorldDiscovererTemplate: React.FC = () => {
                 onClearMap={handleClearWorldMap}
                 onResetRoute={handleResetRoute}
                 onOpenExport={() => setIsExportModalOpen(true)}
-                pointA={pointA}
-                pointB={pointB}
                 dynamicObstacles={dynamicObstacles}
                 interactionMode={interactionMode}
                 onMapClickCoord={handleMapClickCoord}
+                aiOptimalPath={aiOptimizationResult?.waypoints}
+                candidateIterations={showCandidateIterations ? aiOptimizationResult?.candidateIterations : undefined}
+                voronoiResult={voronoiResult}
+                spiralConfig={spiralConfig}
+                recognizedObstacles={recognizedObstacles}
               />
             </div>
 

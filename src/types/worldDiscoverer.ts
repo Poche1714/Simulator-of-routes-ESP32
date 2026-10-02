@@ -135,23 +135,78 @@ export interface DynamicObstacle {
   color?: string;
 }
 
-export type NavAlgorithmMode = 'tangent_bug' | 'reactive_sonar' | 'potential_field';
+export interface RecognizedObstacle {
+  id: string;
+  worldX: number;
+  worldY: number;
+  distanceCm: number;
+  angleDeg: number;
+  threatLevel: 'low' | 'medium' | 'critical';
+  recommendedAction: 'clear' | 'steer_right' | 'steer_left' | 'reverse_escape';
+  lastSeenMillis: number;
+}
+
+export type NavAlgorithmMode =
+  | 'voronoi_lloyd_spiral'
+  | 'tangent_bug'
+  | 'reactive_sonar'
+  | 'potential_field'
+  | 'ai_optimal';
 
 export type NavState =
   | 'IDLE'
   | 'ORIENTING'
   | 'CRUISING'
+  | 'MOVING_TO_CENTROID'
+  | 'ARRIVED_AT_CENTER'
+  | 'EXECUTING_SPIRAL'
+  | 'RECOGNIZING_OBSTACLE'
+  | 'AVOIDING_OBSTACLE'
   | 'PROBING_WIDE'
   | 'AVOIDING_LEFT'
   | 'AVOIDING_RIGHT'
   | 'REVERSING_ESCAPE'
   | 'REJOINING_GOAL'
+  | 'SPIRAL_COMPLETE'
   | 'GOAL_REACHED'
   | 'BLOCKED';
 
+export interface RouteWaypoint {
+  x: number;
+  y: number;
+  heading?: number;
+  speed?: number;
+  clearanceCm?: number;
+}
+
+export interface CandidateRouteIteration {
+  iteration: number;
+  points: { x: number; y: number }[];
+  distanceCm: number;
+  totalTurnDeg: number;
+  score: number;
+  rejectedReason?: string;
+}
+
+export interface AIRouteOptimizationResult {
+  algorithmUsed: string;
+  iterationsCount: number;
+  totalDistanceCm: number;
+  totalTurnDeg: number;
+  optimalityScore: number;
+  waypoints: RouteWaypoint[];
+  candidateIterations: CandidateRouteIteration[];
+  reasoning: string;
+  turnSmoothnessScore: number;
+  distanceReductionPercentage: number;
+  computedAt: number;
+  mode: 'balanced' | 'min_turns' | 'min_distance';
+}
+
 export interface NavigationRouteStats {
-  pointA: { x: number; y: number };
-  pointB: { x: number; y: number };
+  pointA?: { x: number; y: number };
+  pointB?: { x: number; y: number };
+  targetCentroid?: { x: number; y: number };
   distanceToGoalCm: number;
   straightLineDistanceCm: number;
   actualDistanceTraveledCm: number;
@@ -161,7 +216,22 @@ export interface NavigationRouteStats {
   algorithm: NavAlgorithmMode;
   isNavigating: boolean;
   goalReached: boolean;
+  aiOptimizedResult?: AIRouteOptimizationResult | null;
+  spiralCurrentRadiusCm?: number;
+  spiralTurnsCompleted?: number;
+  spiralMaxRadiusCm?: number;
+  voronoiCellId?: number;
+  rs232Status?: string;
 }
 
-export type MapInteractionMode = 'pan' | 'set_a' | 'set_b' | 'add_obstacle';
+export type MapInteractionMode = 'pan' | 'add_obstacle' | 'set_voronoi_center';
+
+export type {
+  VoronoiCell,
+  VoronoiLloydResult,
+  ArchimedeanSpiralConfig,
+  ArchimedeanSpiralState,
+  Point2D,
+} from '../utils/voronoiLloyd';
+
 

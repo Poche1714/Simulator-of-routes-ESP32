@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import {
   DiscoveredPoint2D,
   TrajectoryPoint,
@@ -7,8 +7,14 @@ import {
   GameVisualTheme,
   DynamicObstacle,
   MapInteractionMode,
+  RecognizedObstacle,
 } from '../../types/worldDiscoverer';
-import { Navigation2, Target, Crosshair, ZoomIn, ZoomOut, Maximize2, Compass, Layers, Flag, ShieldAlert, Plus } from 'lucide-react';
+import {
+  VoronoiLloydResult,
+  ArchimedeanSpiralConfig,
+  generateArchimedeanSpiralPoints,
+} from '../../utils/voronoiLloyd';
+import { Navigation2, Target, Crosshair, ZoomIn, ZoomOut, Maximize2, Compass, Layers, Flag, ShieldAlert, Plus, Disc, Orbit, ShieldCheck } from 'lucide-react';
 
 interface WorldCanvas2DProps {
   points: DiscoveredPoint2D[];
@@ -27,6 +33,11 @@ interface WorldCanvas2DProps {
   dynamicObstacles?: DynamicObstacle[];
   interactionMode?: MapInteractionMode;
   onMapClickCoord?: (worldX: number, worldY: number) => void;
+  aiOptimalPath?: { x: number; y: number }[];
+  candidateIterations?: { iteration: number; points: { x: number; y: number }[]; score?: number; rejectedReason?: string }[];
+  voronoiResult?: VoronoiLloydResult;
+  spiralConfig?: ArchimedeanSpiralConfig;
+  recognizedObstacles?: RecognizedObstacle[];
 }
 
 export const WorldCanvas2D: React.FC<WorldCanvas2DProps> = ({
@@ -44,6 +55,11 @@ export const WorldCanvas2D: React.FC<WorldCanvas2DProps> = ({
   dynamicObstacles = [],
   interactionMode = 'pan',
   onMapClickCoord,
+  aiOptimalPath,
+  candidateIterations,
+  voronoiResult,
+  spiralConfig,
+  recognizedObstacles = [],
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -325,25 +341,7 @@ export const WorldCanvas2D: React.FC<WorldCanvas2DProps> = ({
     }
     ctx.restore();
 
-    // 2. Draw Discovered World Obstacles (Point Cloud & Wall Segments)
-    // Connect points that are close (< 22cm) to visually sketch room boundaries
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = palette.pointObstacleGlow;
-    ctx.beginPath();
-    for (let i = 0; i < points.length; i++) {
-      const p1 = points[i];
-      const s1 = worldToScreen(p1.worldX, p1.worldY);
-      for (let j = i + 1; j < Math.min(i + 8, points.length); j++) {
-        const p2 = points[j];
-        const dist = Math.hypot(p1.worldX - p2.worldX, p1.worldY - p2.worldY);
-        if (dist < 22) {
-          const s2 = worldToScreen(p2.worldX, p2.worldY);
-          ctx.moveTo(s1.sx, s1.sy);
-          ctx.lineTo(s2.sx, s2.sy);
-        }
-      }
-    }
-    ctx.stroke();
+    // 2. Draw Discovered World Obstacles (Discrete Point Cloud)
 
     // Render individual obstacle points with hits confidence
     points.forEach((p) => {
@@ -414,89 +412,272 @@ export const WorldCanvas2D: React.FC<WorldCanvas2DProps> = ({
       });
     }
 
-    // 2.6 Draw Ideal Straight Path from Point A to Point B (Reference Baseline)
-    if (pointA && pointB) {
-      const sA = worldToScreen(pointA.x, pointA.y);
-      const sB = worldToScreen(pointB.x, pointB.y);
+    // 2.6 Draw Voronoi Partition Cells & Lloyd Relaxation Centroids
+    if (voronoiResult && voronoiResult.cells && voronoiResult.cells.length > 0) {
+      voronoiResult.cells.forEach((cell) => {
+        if (!cell.polygon || cell.polygon.length < 3) return;
 
-      ctx.beginPath();
-      ctx.moveTo(sA.sx, sA.sy);
-      ctx.lineTo(sB.sx, sB.sy);
-      ctx.strokeStyle = 'rgba(245, 158, 11, 0.35)';
-      ctx.lineWidth = 1.8;
-      ctx.setLineDash([6, 6]);
-      ctx.stroke();
-      ctx.setLineDash([]);
+        // Draw Cell Polygon
+        ctx.beginPath();
+        const p0 = worldToScreen(cell.polygon[0].x, cell.polygon[0].y);
+        ctx.moveTo(p0.sx, p0.sy);
+        for (let i = 1; i < cell.polygon.length; i++) {
+          const pi = worldToScreen(cell.polygon[i].x, cell.polygon[i].y);
+          ctx.lineTo(pi.sx, pi.sy);
+        }
+        ctx.closePath();
 
-      const straightDistCm = Math.hypot(pointB.x - pointA.x, pointB.y - pointA.y);
-      const midX = (sA.sx + sB.sx) / 2;
-      const midY = (sA.sy + sB.sy) / 2;
+        if (cell.isAssigned) {
+          ctx.fillStyle = 'rgba(6, 182, 212, 0.12)';
+          ctx.fill();
+          ctx.strokeStyle = '#06b6d4';
+          ctx.lineWidth = 2.4;
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = cell.color || 'rgba(148, 163, 184, 0.06)';
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(148, 163, 184, 0.3)';
+          ctx.lineWidth = 1.2;
+          ctx.setLineDash([4, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
 
-      ctx.font = '9px "JetBrains Mono", monospace';
-      ctx.fillStyle = '#f59e0b';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(`Línea Directa A➔B: ${(straightDistCm / 100).toFixed(2)}m`, midX, midY - 10);
+        // Draw Cell Centroid (Lloyd relaxed)
+        const cScreen = worldToScreen(cell.centroid.x, cell.centroid.y);
+        if (cell.isAssigned) {
+          // Assigned Centroid Target Beacon
+          ctx.beginPath();
+          ctx.arc(cScreen.sx, cScreen.sy, 16, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(6, 182, 212, 0.2)';
+          ctx.fill();
+          ctx.strokeStyle = '#06b6d4';
+          ctx.lineWidth = 2.2;
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(cScreen.sx, cScreen.sy, 8, 0, Math.PI * 2);
+          ctx.strokeStyle = '#67e8f9';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(cScreen.sx, cScreen.sy, 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = '#06b6d4';
+          ctx.fill();
+
+          ctx.font = 'bold 10px "Plus Jakarta Sans", sans-serif';
+          ctx.fillStyle = '#22d3ee';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(`CENTROIDE LLOYD #${cell.id} (${cell.centroid.x.toFixed(0)}, ${cell.centroid.y.toFixed(0)})`, cScreen.sx, cScreen.sy - 18);
+        } else {
+          // Other cell centroids
+          ctx.beginPath();
+          ctx.arc(cScreen.sx, cScreen.sy, 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(148, 163, 184, 0.6)';
+          ctx.fill();
+
+          ctx.font = '9px monospace';
+          ctx.fillStyle = 'rgba(148, 163, 184, 0.7)';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillText(`C#${cell.id}`, cScreen.sx, cScreen.sy + 5);
+        }
+      });
+
+      // 2.62 Draw Metric Separation Distance between Voronoi Points (>= 5.0m indicator)
+      if (voronoiResult.cells.length >= 2) {
+        const drawnPairs = new Set<string>();
+        const minTargetCm = voronoiResult.minPointDistanceCm || 500;
+
+        voronoiResult.cells.forEach((c1, i) => {
+          voronoiResult.cells.forEach((c2, j) => {
+            if (i >= j) return;
+            const pairKey = `${i}-${j}`;
+            if (drawnPairs.has(pairKey)) return;
+            drawnPairs.add(pairKey);
+
+            const distCm = Math.hypot(c2.centroid.x - c1.centroid.x, c2.centroid.y - c1.centroid.y);
+            // Connect adjacent neighbors within 1.6x of the min distance
+            if (distCm <= minTargetCm * 1.6) {
+              const s1 = worldToScreen(c1.centroid.x, c1.centroid.y);
+              const s2 = worldToScreen(c2.centroid.x, c2.centroid.y);
+
+              // Connecting dashed line
+              ctx.beginPath();
+              ctx.moveTo(s1.sx, s1.sy);
+              ctx.lineTo(s2.sx, s2.sy);
+              ctx.strokeStyle = 'rgba(6, 182, 212, 0.35)';
+              ctx.lineWidth = 1.2;
+              ctx.setLineDash([4, 4]);
+              ctx.stroke();
+              ctx.setLineDash([]);
+
+              // Midpoint distance badge
+              const midSx = (s1.sx + s2.sx) / 2;
+              const midSy = (s1.sy + s2.sy) / 2;
+              const distM = (distCm / 100).toFixed(1);
+
+              ctx.font = 'bold 9px "JetBrains Mono", monospace';
+              const badgeText = `⟷ ${distM}m (≥ 5m)`;
+              const textWidth = ctx.measureText(badgeText).width;
+
+              ctx.fillStyle = 'rgba(10, 15, 26, 0.88)';
+              ctx.fillRect(midSx - textWidth / 2 - 4, midSy - 8, textWidth + 8, 16);
+              ctx.strokeStyle = 'rgba(6, 182, 212, 0.5)';
+              ctx.lineWidth = 1;
+              ctx.strokeRect(midSx - textWidth / 2 - 4, midSy - 8, textWidth + 8, 16);
+
+              ctx.fillStyle = '#67e8f9';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(badgeText, midSx, midSy);
+            }
+          });
+        });
+      }
     }
 
-    // 2.7 Draw Point A (Start / Origin)
-    if (pointA) {
-      const { sx, sy } = worldToScreen(pointA.x, pointA.y);
+    // 2.65 Draw Archimedean Spiral Path (r = a + b * theta) around Voronoi Centroid
+    // CRITICAL CONSTRAINT: Strictly clipped and confined to the boundaries of the Voronoi cell partition!
+    if (spiralConfig && voronoiResult) {
+      const assignedCell =
+        voronoiResult.cells.find((c) => c.isAssigned) || voronoiResult.cells[0];
+      const assignedCentroid = voronoiResult.assignedCentroid || spiralConfig.center;
 
-      // Outer beacon ring
-      ctx.beginPath();
-      ctx.arc(sx, sy, 14, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(16, 185, 129, 0.2)';
-      ctx.fill();
-      ctx.strokeStyle = '#10b981';
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      const spiralPoints = generateArchimedeanSpiralPoints(
+        {
+          ...spiralConfig,
+          center: assignedCentroid,
+          boundaryPolygon: assignedCell?.polygon,
+        },
+        6,
+        assignedCell?.polygon,
+        15
+      );
 
-      // Inner disc
-      ctx.beginPath();
-      ctx.arc(sx, sy, 6, 0, Math.PI * 2);
-      ctx.fillStyle = '#10b981';
-      ctx.fill();
+      if (
+        spiralPoints.length > 2 &&
+        assignedCell &&
+        assignedCell.polygon &&
+        assignedCell.polygon.length >= 3
+      ) {
+        // Compute active coverage radius inside this cell
+        const lastPt = spiralPoints[spiralPoints.length - 1];
+        const activeRadiusCm = Math.hypot(
+          lastPt.x - assignedCentroid.x,
+          lastPt.y - assignedCentroid.y
+        );
 
-      ctx.font = 'bold 10px "Plus Jakarta Sans", sans-serif';
-      ctx.fillStyle = '#34d399';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText('PUNTO A (Inicio)', sx, sy - 16);
+        const cScr = worldToScreen(assignedCentroid.x, assignedCentroid.y);
+        const activeRPx = activeRadiusCm * basePpc;
+
+        ctx.save();
+        // 1. Physically clip all drawing operations exclusively to the assigned Voronoi cell polygon!
+        ctx.beginPath();
+        const p0 = worldToScreen(assignedCell.polygon[0].x, assignedCell.polygon[0].y);
+        ctx.moveTo(p0.sx, p0.sy);
+        for (let i = 1; i < assignedCell.polygon.length; i++) {
+          const pi = worldToScreen(assignedCell.polygon[i].x, assignedCell.polygon[i].y);
+          ctx.lineTo(pi.sx, pi.sy);
+        }
+        ctx.closePath();
+        ctx.clip(); // <--- GUARANTEES SPIRAL NEVER PASSES OUTSIDE THE VORONOI CELL
+
+        // 2. Draw Spiral Path Line starting directly from the center
+        ctx.beginPath();
+        const sp0 = worldToScreen(spiralPoints[0].x, spiralPoints[0].y);
+        ctx.moveTo(sp0.sx, sp0.sy);
+        for (let i = 1; i < spiralPoints.length; i++) {
+          const spi = worldToScreen(spiralPoints[i].x, spiralPoints[i].y);
+          ctx.lineTo(spi.sx, spi.sy);
+        }
+        ctx.strokeStyle = 'rgba(34, 211, 238, 0.75)';
+        ctx.lineWidth = 2.2;
+        ctx.setLineDash([5, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // 3. Maximum Coverage Inradius Perimeter Circle
+        ctx.beginPath();
+        ctx.arc(cScr.sx, cScr.sy, activeRPx, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(6, 182, 212, 0.4)';
+        ctx.lineWidth = 1.4;
+        ctx.setLineDash([3, 5]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.restore(); // Restore unclipped state
+
+        // 4. Center of this Voronoi Point (Origin of the Spiral) Target Marker
+        ctx.beginPath();
+        ctx.arc(cScr.sx, cScr.sy, 14, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(34, 211, 238, 0.6)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(cScr.sx, cScr.sy, 6, 0, Math.PI * 2);
+        ctx.fillStyle = '#22d3ee';
+        ctx.fill();
+
+        // 5. Spiral Label indicating origin at center and confinement to Voronoi cell
+        ctx.font = 'bold 9px "JetBrains Mono", monospace';
+        ctx.fillStyle = '#22d3ee';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(
+          `Espiral Confinada a Celda Voronoi #${assignedCell.id}: r ≤ ${activeRadiusCm.toFixed(0)}cm (Origen: Centroide)`,
+          cScr.sx,
+          cScr.sy - activeRPx - 6
+        );
+
+        ctx.font = 'bold 8.5px "JetBrains Mono", monospace';
+        ctx.fillStyle = '#a5f3fc';
+        ctx.fillText(
+          `Origen de Espiral: (${assignedCentroid.x.toFixed(0)}, ${assignedCentroid.y.toFixed(0)})cm`,
+          cScr.sx,
+          cScr.sy + 18
+        );
+      }
     }
 
-    // 2.8 Draw Point B (Goal / Target)
-    if (pointB) {
-      const { sx, sy } = worldToScreen(pointB.x, pointB.y);
+    // 2.68 Draw ESP32 Intelligent Obstacle Recognition Overlays
+    if (recognizedObstacles && recognizedObstacles.length > 0) {
+      recognizedObstacles.forEach((obs) => {
+        const oScr = worldToScreen(obs.worldX, obs.worldY);
+        const isCrit = obs.threatLevel === 'critical';
+        const isMed = obs.threatLevel === 'medium';
 
-      // Outer pulsating beacon ring
-      ctx.beginPath();
-      ctx.arc(sx, sy, 16, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(245, 158, 11, 0.25)';
-      ctx.fill();
-      ctx.strokeStyle = '#f59e0b';
-      ctx.lineWidth = 2.4;
-      ctx.stroke();
+        // Sensor threat ring
+        ctx.beginPath();
+        ctx.arc(oScr.sx, oScr.sy, 18 * camera.zoom, 0, Math.PI * 2);
+        ctx.strokeStyle = isCrit ? 'rgba(239, 68, 68, 0.8)' : isMed ? 'rgba(245, 158, 11, 0.7)' : 'rgba(6, 182, 212, 0.5)';
+        ctx.lineWidth = isCrit ? 2.2 : 1.5;
+        ctx.stroke();
 
-      // Second ring
-      ctx.beginPath();
-      ctx.arc(sx, sy, 9, 0, Math.PI * 2);
-      ctx.strokeStyle = '#fef08a';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+        if (isCrit) {
+          ctx.beginPath();
+          ctx.arc(oScr.sx, oScr.sy, 26 * camera.zoom, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(239, 68, 68, 0.35)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 3]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
 
-      // Target bullseye dot
-      ctx.beginPath();
-      ctx.arc(sx, sy, 4, 0, Math.PI * 2);
-      ctx.fillStyle = '#f59e0b';
-      ctx.fill();
-
-      // Target Label
-      ctx.font = 'bold 10px "Plus Jakarta Sans", sans-serif';
-      ctx.fillStyle = '#fbbf24';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
-      ctx.fillText('PUNTO B (Destino)', sx, sy - 18);
+        // Threat badge
+        ctx.font = 'bold 8px monospace';
+        ctx.fillStyle = isCrit ? '#f87171' : isMed ? '#fbbf24' : '#67e8f9';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(
+          `${obs.distanceCm.toFixed(0)}cm [${obs.recommendedAction === 'steer_right' ? '↷DER' : '↶IZQ'}]`,
+          oScr.sx,
+          oScr.sy + 12
+        );
+      });
     }
 
     // 3. Draw the TRAJECTORY / ROUTE performed by the Bot (Core Feature)
@@ -1034,30 +1215,22 @@ export const WorldCanvas2D: React.FC<WorldCanvas2DProps> = ({
         </div>
       </div>
 
-      {/* Active Placement Tool Banner if setting A, B, or Obstacle */}
+      {/* Active Placement Tool Banner if adding obstacle or setting center */}
       {interactionMode !== 'pan' && (
         <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20 bg-neutral-900/95 backdrop-blur-md border border-amber-500/50 px-4 py-2 rounded-xl text-xs shadow-2xl flex items-center gap-2 animate-bounce pointer-events-auto">
-          {interactionMode === 'set_a' && (
-            <>
-              <Flag className="w-4 h-4 text-emerald-400" />
-              <span className="font-semibold text-emerald-300">
-                Modo: Haz clic en el mapa para situar el PUNTO A (Inicio)
-              </span>
-            </>
-          )}
-          {interactionMode === 'set_b' && (
-            <>
-              <Target className="w-4 h-4 text-amber-400" />
-              <span className="font-semibold text-amber-300">
-                Modo: Haz clic en el mapa para situar el PUNTO B (Destino)
-              </span>
-            </>
-          )}
           {interactionMode === 'add_obstacle' && (
             <>
-              <Plus className="w-4 h-4 text-rose-400" />
-              <span className="font-semibold text-rose-300">
-                Modo: Haz clic en el mapa para colocar un obstáculo
+              <Plus className="w-4 h-4 text-amber-400" />
+              <span className="font-semibold text-amber-300">
+                Modo: Haz clic en el mapa para colocar un obstáculo para prueba de evasión
+              </span>
+            </>
+          )}
+          {interactionMode === 'set_voronoi_center' && (
+            <>
+              <Disc className="w-4 h-4 text-cyan-400" />
+              <span className="font-semibold text-cyan-300">
+                Modo: Haz clic en el mapa para fijar el centro de la Espiral de Arquímedes
               </span>
             </>
           )}

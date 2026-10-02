@@ -80,30 +80,36 @@ float posX_cm       = 0.0;
 float posY_cm       = 30.0;
 float botHeadingDeg = 90.0; // 90° es Norte (+Y)
 
-// --- Estado de Navegación Punto A -> Punto B (v2.0.0) ---
+// --- Estado de Misión: Partición Voronoi, Lloyd & Espiral de Arquímedes (RS232) ---
 enum NavState {
   NAV_IDLE,
   NAV_ORIENTING,
-  NAV_CRUISING,
+  NAV_MOVING_TO_CENTROID,
+  NAV_EXECUTING_SPIRAL,
   NAV_PROBING_WIDE,
   NAV_AVOIDING_LEFT,
   NAV_AVOIDING_RIGHT,
   NAV_REVERSING_ESCAPE,
-  NAV_REJOINING_GOAL,
-  NAV_GOAL_REACHED
+  NAV_SPIRAL_COMPLETE,
+  NAV_CRUISING
 };
 
-NavState navState     = NAV_IDLE;
-bool isNavActive      = false;
-float pointAx_cm      = 0.0;
-float pointAy_cm      = 30.0;
-float pointBx_cm      = 100.0;
-float pointBy_cm      = 250.0;
-float distToGoalCm    = 0.0;
-float totalDetourCm   = 0.0;
-int avoidanceTicks    = 0;
-int reversingTicks    = 0;
-int escapePivotDeg    = 0;
+NavState navState        = NAV_IDLE;
+bool isNavActive         = false;
+float centroidX_cm       = 0.0;
+float centroidY_cm       = 150.0;
+float distToCentroidCm   = 0.0;
+float totalDetourCm      = 0.0;
+
+// Parámetros de la Espiral de Arquímedes: r(theta) = a + b * theta
+float spiral_a_cm        = 5.0;   // Radio inicial
+float spiral_pitch_cm    = 28.0;  // Paso entre espiras (d = 2*pi*b)
+float spiral_max_r_cm    = 140.0; // Radio máximo
+float spiral_theta_rad   = 0.0;   // Ángulo acumulado
+float spiral_current_r   = 5.0;   // Radio actual
+int avoidanceTicks       = 0;
+int reversingTicks       = 0;
+int escapePivotDeg       = 0;
 
 int clampPwm(int value) {
   if (value < MIN_MOTOR_PWM) return MIN_MOTOR_PWM;
@@ -439,18 +445,16 @@ void loop() {
         Serial.printf("NAV:SET_A,%.1f,%.1f\\n", pointAx_cm, pointAy_cm);
         Serial.printf("POS:%.1f,%.1f,%.1f\\n", posX_cm, posY_cm, botHeadingDeg);
       }
-    } else if (cmd.startsWith("SET_B:")) {
-      int comma = cmd.indexOf(',');
-      if (comma > 0) {
-        pointBx_cm = cmd.substring(6, comma).toFloat();
-        pointBy_cm = cmd.substring(comma + 1).toFloat();
-        Serial.printf("NAV:SET_B,%.1f,%.1f\\n", pointBx_cm, pointBy_cm);
-      }
-    } else if (cmd == "NAV_TO_B" || cmd == "NAV:START") {
+    } else if (cmd.startsWith("RS232:RX,[VORONOI") || cmd.startsWith("VORONOI:START")) {
       isNavActive = true;
-      navState = NAV_ORIENTING;
+      navState = NAV_MOVING_TO_CENTROID;
       totalDetourCm = 0.0;
-      Serial.printf("NAV:START,A(%.0f,%.0f)->B(%.0f,%.0f)\\n", pointAx_cm, pointAy_cm, pointBx_cm, pointBy_cm);
+      Serial.printf("RS232:LATCH,CENTROID=(%.1f,%.1f),INICIANDO_TRANSITO\n", centroidX_cm, centroidY_cm);
+    } else if (cmd == "AUTO:START" || cmd == "NAV:START") {
+      isNavActive = true;
+      navState = NAV_MOVING_TO_CENTROID;
+      totalDetourCm = 0.0;
+      Serial.println("NAV:AUTO_EXPLORATION_START");
     } else if (cmd == "NAV:STOP" || cmd == "NAV:PAUSE") {
       isNavActive = false;
       navState = NAV_IDLE;
@@ -459,11 +463,11 @@ void loop() {
     } else if (cmd == "NAV:RESET") {
       isNavActive = false;
       navState = NAV_IDLE;
-      posX_cm = pointAx_cm;
-      posY_cm = pointAy_cm;
+      posX_cm = 0.0;
+      posY_cm = 30.0;
       botHeadingDeg = 90.0;
       stopMotors();
-      Serial.printf("POS:%.1f,%.1f,%.1f\\n", posX_cm, posY_cm, botHeadingDeg);
+      Serial.printf("POS:%.1f,%.1f,%.1f\n", posX_cm, posY_cm, botHeadingDeg);
     }
   }
 
@@ -516,29 +520,33 @@ void loop() {
 `;
 
 export interface GenerateFirmwareParams {
-  pointAx: number;
-  pointAy: number;
-  pointBx: number;
-  pointBy: number;
-  motorPwm: number;
+  pointAx?: number;
+  pointAy?: number;
+  pointBx?: number;
+  pointBy?: number;
+  targetCentroid?: { x: number; y: number };
+  motorPwm?: number;
   minClearanceCm?: number;
+  spiralConfig?: { a: number; pitchCm: number; maxRadiusCm: number };
 }
 
-export function generateEsp32WorldFirmwareCode(params: GenerateFirmwareParams): string {
-  const {
-    pointAx,
-    pointAy,
-    pointBx,
-    pointBy,
-    motorPwm = 185,
-    minClearanceCm = 42.0,
-  } = params;
+export function generateEsp32WorldFirmwareCode(
+  navStatsOrParams?: any,
+  _obstacles?: any,
+  pins?: any
+): string {
+  const centroidX = navStatsOrParams?.targetCentroid?.x ?? navStatsOrParams?.pointBx ?? 0.0;
+  const centroidY = navStatsOrParams?.targetCentroid?.y ?? navStatsOrParams?.pointBy ?? 150.0;
+  const pwm = pins?.motorPwm ?? navStatsOrParams?.motorPwm ?? 185;
+  const spiralA = navStatsOrParams?.spiralConfig?.a ?? 5.0;
+  const spiralPitch = navStatsOrParams?.spiralConfig?.pitchCm ?? 28.0;
+  const spiralMaxR = navStatsOrParams?.spiralConfig?.maxRadiusCm ?? 140.0;
 
   return ESP32_WORLD_DISCOVERER_CODE
-    .replace('float pointAx_cm      = 0.0;', `float pointAx_cm      = ${pointAx.toFixed(1)};`)
-    .replace('float pointAy_cm      = 30.0;', `float pointAy_cm      = ${pointAy.toFixed(1)};`)
-    .replace('float pointBx_cm      = 100.0;', `float pointBx_cm      = ${pointBx.toFixed(1)};`)
-    .replace('float pointBy_cm      = 250.0;', `float pointBy_cm      = ${pointBy.toFixed(1)};`)
-    .replace('int currentMotorPwm     = 185;', `int currentMotorPwm     = ${motorPwm};`)
-    .replace('const float SAFE_CLEARANCE_CM = 42.0;', `const float SAFE_CLEARANCE_CM = ${minClearanceCm.toFixed(1)};`);
+    .replace('float centroidX_cm       = 0.0;', `float centroidX_cm       = ${centroidX.toFixed(1)};`)
+    .replace('float centroidY_cm       = 150.0;', `float centroidY_cm       = ${centroidY.toFixed(1)};`)
+    .replace('float spiral_a_cm        = 5.0;', `float spiral_a_cm        = ${spiralA.toFixed(1)};`)
+    .replace('float spiral_pitch_cm    = 28.0;', `float spiral_pitch_cm    = ${spiralPitch.toFixed(1)};`)
+    .replace('float spiral_max_r_cm    = 140.0;', `float spiral_max_r_cm    = ${spiralMaxR.toFixed(1)};`)
+    .replace('int currentMotorPwm     = 185;', `int currentMotorPwm     = ${pwm};`);
 }

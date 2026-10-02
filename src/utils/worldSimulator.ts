@@ -28,60 +28,29 @@ export interface WorldMapLayout {
 
 export const WORLD_PRESETS: Record<MapEnvironmentPreset, WorldMapLayout> = {
   dungeon_chamber: {
-    name: 'Cámara y Pasadizos Subterráneos',
-    description: 'Templo antiguo con pilares circulares, cámara central y corredor de exploración.',
+    name: 'Entorno de Obstáculos: Sala Principal',
+    description: 'Espacio abierto con columnas y obstáculos cilíndricos para prueba de sensores y navegación.',
     recommendedStart: { x: 0, y: 30, heading: 90 },
     bounds: { minX: -260, maxX: 260, minY: -40, maxY: 420 },
-    walls: [
-      // Outer Room Boundaries
-      { x1: -220, y1: 0, x2: 220, y2: 0, type: 'wall' }, // South Wall
-      { x1: -220, y1: 0, x2: -220, y2: 260, type: 'wall' }, // West Wall Room 1
-      { x1: 220, y1: 0, x2: 220, y2: 260, type: 'wall' }, // East Wall Room 1
-      // North Wall with central doorway to Hallway
-      { x1: -220, y1: 260, x2: -50, y2: 260, type: 'wall' },
-      { x1: 50, y1: 260, x2: 220, y2: 260, type: 'wall' },
-      // Hallway Walls extending North
-      { x1: -50, y1: 260, x2: -50, y2: 400, type: 'wall' },
-      { x1: 50, y1: 260, x2: 50, y2: 400, type: 'wall' },
-      { x1: -50, y1: 400, x2: 50, y2: 400, type: 'wall' }, // Corridor end
-      // Internal Ruins & Columns
-      { x1: -140, y1: 100, x2: -90, y2: 150, type: 'obstacle' },
-      { x1: 90, y1: 120, x2: 150, y2: 120, type: 'obstacle' },
-    ],
+    walls: [],
     circles: [
-      // Main pillars
-      { cx: -80, cy: 90, radius: 14, type: 'obstacle' },
-      { cx: 80, cy: 90, radius: 14, type: 'obstacle' },
-      { cx: -80, cy: 190, radius: 14, type: 'obstacle' },
-      { cx: 80, cy: 190, radius: 14, type: 'obstacle' },
-      // Center ancient altar / relic
-      { cx: 0, cy: 170, radius: 20, type: 'anomaly' },
-      // Corridor checkpoint
-      { cx: 0, cy: 340, radius: 12, type: 'anomaly' },
+      { cx: -80, cy: 90, radius: 16, type: 'obstacle' },
+      { cx: 80, cy: 90, radius: 16, type: 'obstacle' },
+      { cx: -80, cy: 190, radius: 16, type: 'obstacle' },
+      { cx: 80, cy: 190, radius: 16, type: 'obstacle' },
+      { cx: 0, cy: 170, radius: 20, type: 'obstacle' },
+      { cx: 0, cy: 340, radius: 14, type: 'obstacle' },
     ],
   },
 
   lunar_ruins: {
-    name: 'Sector de Exploración Lunar',
-    description: 'Cráter abierto con montículos rocosos, crestas y monolitos.',
+    name: 'Sector de Exploración: Pilares y Rocas',
+    description: 'Área abierta con montículos y pilares de prueba para detección ultrasónica.',
     recommendedStart: { x: -80, y: 50, heading: 60 },
     bounds: { minX: -280, maxX: 280, minY: -50, maxY: 380 },
-    walls: [
-      // Crater Rim polygon segments
-      { x1: -220, y1: 60, x2: -160, y2: 240, type: 'wall' },
-      { x1: -160, y1: 240, x2: -20, y2: 320, type: 'wall' },
-      { x1: -20, y1: 320, x2: 170, y2: 290, type: 'wall' },
-      { x1: 170, y1: 290, x2: 240, y2: 130, type: 'wall' },
-      { x1: 240, y1: 130, x2: 140, y2: 0, type: 'wall' },
-      { x1: 140, y1: 0, x2: -120, y2: -10, type: 'wall' },
-      { x1: -120, y1: -10, x2: -220, y2: 60, type: 'wall' },
-      // Rock Ridge Barrier
-      { x1: -50, y1: 100, x2: 30, y2: 80, type: 'obstacle' },
-    ],
+    walls: [],
     circles: [
-      // Alien Monolith
-      { cx: 20, cy: 200, radius: 18, type: 'anomaly' },
-      // Crater Boulders
+      { cx: 20, cy: 200, radius: 18, type: 'obstacle' },
       { cx: -110, cy: 150, radius: 24, type: 'obstacle' },
       { cx: 90, cy: 140, radius: 22, type: 'obstacle' },
       { cx: -50, cy: 240, radius: 16, type: 'obstacle' },
@@ -90,54 +59,32 @@ export const WORLD_PRESETS: Record<MapEnvironmentPreset, WorldMapLayout> = {
   },
 
   room_interior: {
-    name: 'Entorno Interior / Laboratorio Robótico',
-    description: 'Habitación cerrada con mesas, sillas, obstáculos y estanterías.',
+    name: 'Entorno Interior: Obstáculos Discretos',
+    description: 'Entorno de trabajo con módulos cilíndricos y elementos para evasión autónoma.',
     recommendedStart: { x: 0, y: 40, heading: 90 },
     bounds: { minX: -200, maxX: 200, minY: -20, maxY: 340 },
-    walls: [
-      // Room perimeter
-      { x1: -180, y1: 0, x2: 180, y2: 0, type: 'wall' },
-      { x1: -180, y1: 0, x2: -180, y2: 300, type: 'wall' },
-      { x1: 180, y1: 0, x2: 180, y2: 300, type: 'wall' },
-      { x1: -180, y1: 300, x2: 180, y2: 300, type: 'wall' },
-      // Office desk / Workstation
-      { x1: -140, y1: 150, x2: -60, y2: 150, type: 'obstacle' },
-      { x1: -60, y1: 150, x2: -60, y2: 90, type: 'obstacle' },
-      // Bookcase / Divider
-      { x1: 70, y1: 180, x2: 150, y2: 180, type: 'obstacle' },
-    ],
+    walls: [],
     circles: [
-      // Swivel chairs
       { cx: -100, cy: 110, radius: 15, type: 'obstacle' },
       { cx: 30, cy: 120, radius: 14, type: 'obstacle' },
-      // Waste bin / box
       { cx: 130, cy: 50, radius: 12, type: 'obstacle' },
-      // Charging station / target beacon
-      { cx: 0, cy: 260, radius: 14, type: 'anomaly' },
+      { cx: 0, cy: 260, radius: 16, type: 'obstacle' },
+      { cx: -70, cy: 190, radius: 18, type: 'obstacle' },
     ],
   },
 
   corridor_maze: {
-    name: 'Laberinto de Navegación SLAM',
-    description: 'Circuito continuo con giros de 90° ideal para registrar rutas largas del bot.',
+    name: 'Circuito de Columnas de Maniobra',
+    description: 'Conjunto de columnas de referencia para validación de trayectorias y espiral.',
     recommendedStart: { x: -160, y: 40, heading: 90 },
     bounds: { minX: -240, maxX: 240, minY: -20, maxY: 380 },
-    walls: [
-      // Outer boundaries
-      { x1: -220, y1: 0, x2: 220, y2: 0, type: 'wall' },
-      { x1: -220, y1: 0, x2: -220, y2: 360, type: 'wall' },
-      { x1: 220, y1: 0, x2: 220, y2: 360, type: 'wall' },
-      { x1: -220, y1: 360, x2: 220, y2: 360, type: 'wall' },
-      // Maze corridors
-      { x1: -110, y1: 0, x2: -110, y2: 260, type: 'wall' },
-      { x1: 0, y1: 100, x2: 0, y2: 360, type: 'wall' },
-      { x1: 110, y1: 0, x2: 110, y2: 260, type: 'wall' },
-    ],
+    walls: [],
     circles: [
-      { cx: -160, cy: 300, radius: 15, type: 'anomaly' },
-      { cx: -50, cy: 60, radius: 14, type: 'obstacle' },
-      { cx: 50, cy: 300, radius: 14, type: 'obstacle' },
-      { cx: 160, cy: 60, radius: 16, type: 'anomaly' },
+      { cx: -110, cy: 120, radius: 16, type: 'obstacle' },
+      { cx: 0, cy: 200, radius: 18, type: 'obstacle' },
+      { cx: 110, cy: 120, radius: 16, type: 'obstacle' },
+      { cx: -50, cy: 270, radius: 15, type: 'obstacle' },
+      { cx: 50, cy: 270, radius: 15, type: 'obstacle' },
     ],
   },
 };
@@ -226,18 +173,9 @@ export function simulateSonarPing(
   const dy = Math.sin(beamRad);
 
   let closestDist = maxRangeCm;
-  let hitType: 'wall' | 'obstacle' | 'anomaly' = 'wall';
+  let hitType: 'wall' | 'obstacle' | 'anomaly' = 'obstacle';
 
-  // Check walls
-  for (const wall of layout.walls) {
-    const dist = rayLineIntersect(botPose.x, botPose.y, dx, dy, wall.x1, wall.y1, wall.x2, wall.y2);
-    if (dist !== null && dist < closestDist && dist >= 2) {
-      closestDist = dist;
-      hitType = wall.type || 'wall';
-    }
-  }
-
-  // Check preset circles
+  // Check preset circular obstacles
   for (const circ of layout.circles) {
     const dist = rayCircleIntersect(botPose.x, botPose.y, dx, dy, circ.cx, circ.cy, circ.radius);
     if (dist !== null && dist < closestDist && dist >= 2) {

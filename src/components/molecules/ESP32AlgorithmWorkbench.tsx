@@ -1,24 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import {
+  NavigationRouteStats,
   DynamicObstacle,
   NavAlgorithmMode,
   MapInteractionMode,
-  NavigationRouteStats,
+  RecognizedObstacle,
 } from '../../types/worldDiscoverer';
 import {
+  VoronoiLloydResult,
+  ArchimedeanSpiralConfig,
+  DEFAULT_SPIRAL_CONFIG,
+} from '../../utils/voronoiLloyd';
+import {
+  Cpu,
   Play,
   Pause,
   RotateCcw,
   Plus,
   Trash2,
-  Cpu,
-  Target,
-  Flag,
-  ShieldAlert,
-  Zap,
-  Sparkles,
-  Compass,
-  ArrowRight,
   Sliders,
   Radio,
   CheckCircle2,
@@ -26,6 +25,19 @@ import {
   Copy,
   Check,
   Download,
+  Orbit,
+  TrendingDown,
+  Layers,
+  Award,
+  Bot,
+  Disc,
+  Settings2,
+  Activity,
+  Wifi,
+  ShieldCheck,
+  AlertTriangle,
+  Maximize2,
+  Target,
 } from 'lucide-react';
 import { generateEsp32WorldFirmwareCode } from '../../utils/esp32WorldFirmware';
 
@@ -34,8 +46,6 @@ interface ESP32AlgorithmWorkbenchProps {
   dynamicObstacles: DynamicObstacle[];
   interactionMode: MapInteractionMode;
   onInteractionModeChange: (mode: MapInteractionMode) => void;
-  onSetPointA: (x: number, y: number) => void;
-  onSetPointB: (x: number, y: number) => void;
   onSetAlgorithm: (algo: NavAlgorithmMode) => void;
   onStartNavigation: () => void;
   onPauseNavigation: () => void;
@@ -50,6 +60,14 @@ interface ESP32AlgorithmWorkbenchProps {
     motorPwm: number;
     isObstacleAlert: boolean;
   };
+  // Voronoi, Lloyd & Archimedean Spiral props
+  voronoiResult?: VoronoiLloydResult;
+  spiralConfig?: ArchimedeanSpiralConfig;
+  recognizedObstacles?: RecognizedObstacle[];
+  rs232Logs?: string[];
+  onRunVoronoiAndSpiral?: (customConfig?: Partial<ArchimedeanSpiralConfig>) => void;
+  onUpdateSpiralConfig?: (newConf: Partial<ArchimedeanSpiralConfig>) => void;
+  onResetSpiralDefaults?: () => void;
 }
 
 export const ESP32AlgorithmWorkbench: React.FC<ESP32AlgorithmWorkbenchProps> = ({
@@ -57,9 +75,6 @@ export const ESP32AlgorithmWorkbench: React.FC<ESP32AlgorithmWorkbenchProps> = (
   dynamicObstacles,
   interactionMode,
   onInteractionModeChange,
-  onSetPointA,
-  onSetPointB,
-  onSetAlgorithm,
   onStartNavigation,
   onPauseNavigation,
   onResetToA,
@@ -67,109 +82,166 @@ export const ESP32AlgorithmWorkbench: React.FC<ESP32AlgorithmWorkbenchProps> = (
   onClearObstacles,
   onSpawnObstaclesPreset,
   hardwarePins,
+  voronoiResult,
+  spiralConfig = DEFAULT_SPIRAL_CONFIG,
+  recognizedObstacles = [],
+  rs232Logs = [],
+  onRunVoronoiAndSpiral,
+  onUpdateSpiralConfig,
+  onResetSpiralDefaults,
 }) => {
-  const [inputBx, setInputBx] = useState(navStats.pointB.x.toString());
-  const [inputBy, setInputBy] = useState(navStats.pointB.y.toString());
-  const [activeTab, setActiveTab] = useState<'control' | 'obstacles' | 'firmware' | 'hardware'>('control');
+  const [activeTab, setActiveTab] = useState<'voronoi_spiral' | 'obstacles' | 'recognition' | 'firmware' | 'hardware'>('voronoi_spiral');
   const [copiedCode, setCopiedCode] = useState(false);
 
-  useEffect(() => {
-    setInputBx(navStats.pointB.x.toString());
-    setInputBy(navStats.pointB.y.toString());
-  }, [navStats.pointB.x, navStats.pointB.y]);
+  // Local state for Archimedean spiral configuration inputs
+  const [localA, setLocalA] = useState(spiralConfig.a.toString());
+  const [localPitch, setLocalPitch] = useState(spiralConfig.pitchCm.toString());
+  const [localMaxRadius, setLocalMaxRadius] = useState(spiralConfig.maxRadiusCm.toString());
+  const [localAngularSpeed, setLocalAngularSpeed] = useState(spiralConfig.angularSpeedDeg.toString());
+  const [localDirection, setLocalDirection] = useState<'clockwise' | 'counter_clockwise'>(spiralConfig.direction);
 
-  const handleApplyPointB = () => {
-    const bx = parseFloat(inputBx);
-    const by = parseFloat(inputBy);
-    if (!isNaN(bx) && !isNaN(by)) onSetPointB(bx, by);
+  useEffect(() => {
+    setLocalA(spiralConfig.a.toString());
+    setLocalPitch(spiralConfig.pitchCm.toString());
+    setLocalMaxRadius(spiralConfig.maxRadiusCm.toString());
+    setLocalAngularSpeed(spiralConfig.angularSpeedDeg.toString());
+    setLocalDirection(spiralConfig.direction);
+  }, [spiralConfig]);
+
+  const handleApplySpiralConfig = () => {
+    const a = parseFloat(localA) || DEFAULT_SPIRAL_CONFIG.a;
+    const pitchCm = parseFloat(localPitch) || DEFAULT_SPIRAL_CONFIG.pitchCm;
+    const maxRadiusCm = parseFloat(localMaxRadius) || DEFAULT_SPIRAL_CONFIG.maxRadiusCm;
+    const angularSpeedDeg = parseFloat(localAngularSpeed) || DEFAULT_SPIRAL_CONFIG.angularSpeedDeg;
+
+    onUpdateSpiralConfig?.({
+      a,
+      pitchCm,
+      maxRadiusCm,
+      angularSpeedDeg,
+      direction: localDirection,
+    });
   };
 
+  const handleCopyFirmware = () => {
+    const code = generateEsp32WorldFirmwareCode(navStats, dynamicObstacles, hardwarePins);
+    navigator.clipboard.writeText(code);
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 2000);
+  };
+
+  const handleDownloadFirmware = () => {
+    const code = generateEsp32WorldFirmwareCode(navStats, dynamicObstacles, hardwarePins);
+    const blob = new Blob([code], { type: 'text/x-c++src' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'esp32_rover_voronoi_firmware.ino';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // State Badge
   const getStatusBadge = () => {
     switch (navStats.state) {
-      case 'GOAL_REACHED':
+      case 'MOVING_TO_CENTROID':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
-            <CheckCircle2 className="w-3 h-3" /> Meta Alcanzada
+          <span className="px-2 py-0.5 rounded text-xs font-mono font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40 flex items-center gap-1.5 animate-pulse">
+            <Bot className="w-3 h-3 text-blue-400" />
+            Navegando al Centroide
           </span>
         );
-      case 'PROBING_WIDE':
+      case 'ARRIVED_AT_CENTER':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-purple-500/25 text-purple-300 border border-purple-500/50 animate-pulse">
-            <Radio className="w-3 h-3 text-purple-400" /> Sonda Ampliada (±65°)
+          <span className="px-2 py-0.5 rounded text-xs font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1.5 animate-pulse">
+            <Target className="w-3 h-3 text-amber-400" />
+            Centro Alcanzado · Iniciando Espiral
+          </span>
+        );
+      case 'EXECUTING_SPIRAL':
+        return (
+          <span className="px-2 py-0.5 rounded text-xs font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 flex items-center gap-1.5 animate-pulse">
+            <Disc className="w-3 h-3 text-cyan-400" />
+            Espiral (Confinada a Voronoi)
+          </span>
+        );
+      case 'SPIRAL_COMPLETE':
+        return (
+          <span className="px-2 py-0.5 rounded text-xs font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5">
+            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+            Espiral Completada (Límite Voronoi)
+          </span>
+        );
+      case 'AVOIDING_LEFT':
+      case 'AVOIDING_RIGHT':
+        return (
+          <span className="px-2 py-0.5 rounded text-xs font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1.5 animate-bounce">
+            <AlertTriangle className="w-3 h-3 text-amber-400" />
+            Esquivando Obstáculo
           </span>
         );
       case 'REVERSING_ESCAPE':
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-rose-500/25 text-rose-300 border border-rose-500/50 animate-bounce">
-            <RotateCcw className="w-3 h-3 text-rose-400" /> Encerrado · Marcha Atrás
-          </span>
-        );
-      case 'AVOIDING_RIGHT':
-        return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">
-            <ShieldAlert className="w-3 h-3" /> Esquive por Derecha (Preferente)
-          </span>
-        );
-      case 'AVOIDING_LEFT':
-        return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-orange-500/20 text-orange-300 border border-orange-500/40 animate-pulse">
-            <ShieldAlert className="w-3 h-3" /> Esquive por Izquierda (Alternativo)
-          </span>
-        );
-      case 'ORIENTING':
-      case 'REJOINING_GOAL':
-        return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
-            <Compass className="w-3 h-3" /> Realineando Rumbo a B
-          </span>
-        );
-      case 'CRUISING':
-        return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40">
-            <ArrowRight className="w-3 h-3" /> En Ruta Directa a B
+          <span className="px-2 py-0.5 rounded text-xs font-mono font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 flex items-center gap-1.5 animate-ping">
+            <RotateCcw className="w-3 h-3 text-rose-400" />
+            Escape de Proximidad
           </span>
         );
       default:
         return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-neutral-800 text-neutral-400 border border-neutral-700">
-            En Espera (Listo)
+          <span className="px-2 py-0.5 rounded text-xs font-mono font-medium bg-neutral-800 text-neutral-400 border border-neutral-700">
+            {navStats.state}
           </span>
         );
     }
   };
 
+  const assignedCentroid = voronoiResult?.assignedCentroid || { x: 0, y: 150 };
+
   return (
-    <div className="bg-neutral-900/90 border border-neutral-800 rounded-xl p-4 flex flex-col gap-4 text-xs font-sans shadow-lg">
-      {/* Header with Title and Mode Tabs */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800 pb-3">
-        <div className="flex items-center gap-2">
-          <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
-            <Cpu className="w-4 h-4" />
+    <div className="w-full bg-neutral-900 border border-neutral-800 rounded-xl p-4 shadow-xl flex flex-col gap-4">
+      {/* Top Header & Tab Switcher */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-neutral-800 pb-3">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-cyan-500/15 text-cyan-400 rounded-lg border border-cyan-500/30">
+            <Cpu className="w-5 h-5" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h3 className="font-bold text-neutral-100 text-sm">Simulador de Código ESP32</h3>
-              <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-amber-500 text-neutral-950 rounded">
-                v2.0.0
+              <h3 className="font-bold text-neutral-100 text-sm">Control ESP32: Voronoi & Espiral de Arquímedes</h3>
+              <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-cyan-500 text-neutral-950 rounded">
+                RS232 UART
               </span>
             </div>
             <p className="text-neutral-400 text-[11px]">
-              Navegación Autónoma A ➔ B · Sonda Ampliada · Prioridad Derecha & Escape
+              Reconocimiento inteligente de obstáculos en ESP32 · Partición Celular Lloyd · Cobertura en Espiral
             </p>
           </div>
         </div>
 
         {/* Tab switchers */}
-        <div className="flex items-center bg-neutral-950 p-1 rounded-lg border border-neutral-800 gap-1">
+        <div className="flex items-center bg-neutral-950 p-1 rounded-lg border border-neutral-800 gap-1 flex-wrap">
           <button
-            onClick={() => setActiveTab('control')}
-            className={`px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer ${
-              activeTab === 'control'
-                ? 'bg-neutral-800 text-amber-300 shadow-sm'
+            onClick={() => setActiveTab('voronoi_spiral')}
+            className={`px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer flex items-center gap-1.5 ${
+              activeTab === 'voronoi_spiral'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
                 : 'text-neutral-400 hover:text-neutral-200'
             }`}
           >
-            Algoritmo & Ruta
+            <Disc className="w-3 h-3 text-cyan-400" />
+            <span>Voronoi & Espiral</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('recognition')}
+            className={`px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer flex items-center gap-1.5 ${
+              activeTab === 'recognition'
+                ? 'bg-neutral-800 text-amber-300 border border-amber-500/30 shadow-sm'
+                : 'text-neutral-400 hover:text-neutral-200'
+            }`}
+          >
+            <ShieldCheck className="w-3 h-3 text-amber-400" />
+            <span>Obstáculos ESP32 ({recognizedObstacles.length})</span>
           </button>
           <button
             onClick={() => setActiveTab('obstacles')}
@@ -179,7 +251,7 @@ export const ESP32AlgorithmWorkbench: React.FC<ESP32AlgorithmWorkbenchProps> = (
                 : 'text-neutral-400 hover:text-neutral-200'
             }`}
           >
-            <span>Obstáculos ({dynamicObstacles.length})</span>
+            <span>Mapa ({dynamicObstacles.length})</span>
           </button>
           <button
             onClick={() => setActiveTab('firmware')}
@@ -206,345 +278,403 @@ export const ESP32AlgorithmWorkbench: React.FC<ESP32AlgorithmWorkbenchProps> = (
         </div>
       </div>
 
-      {/* Main Tab Content */}
-      {activeTab === 'control' && (
+      {/* Main Tab: Voronoi Partitioning & Archimedean Spiral */}
+      {activeTab === 'voronoi_spiral' && (
+        <div className="flex flex-col gap-3.5">
+          {/* Main Action Banner: Button to trigger Voronoi + Lloyd + RS232 + Spiral */}
+          <div className="bg-gradient-to-br from-neutral-950 via-neutral-900/90 to-cyan-950/40 p-4 rounded-xl border border-cyan-500/40 shadow-lg shadow-cyan-950/30 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-3 bg-gradient-to-tr from-cyan-600 to-blue-500 rounded-xl text-neutral-950 shadow-md shadow-cyan-500/30">
+                <Disc className="w-6 h-6 animate-spin" style={{ animationDuration: '8s' }} />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="font-bold text-neutral-100 text-sm sm:text-base">
+                    Partición de Voronoi, Lloyd & Espiral de Arquímedes
+                  </h4>
+                  {getStatusBadge()}
+                </div>
+                <p className="text-neutral-400 text-xs mt-0.5 max-w-xl">
+                  Recibe la partición celular vía <strong>RS232 UART</strong>. El rover navega hasta el centro exacto del punto Voronoi y, al llegar, despliega la <strong>Espiral de Arquímedes</strong> confinada estrictamente a los límites de la partición (margen 15 cm).
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 w-full md:w-auto justify-end flex-wrap">
+              <button
+                type="button"
+                onClick={() => onRunVoronoiAndSpiral?.()}
+                className="px-4 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-neutral-950 font-black text-xs sm:text-sm rounded-lg shadow-lg shadow-cyan-500/25 flex items-center gap-2 transition-all cursor-pointer transform hover:-translate-y-0.5 active:translate-y-0"
+              >
+                <Disc className="w-4 h-4 fill-current" />
+                <span>Ejecutar Voronoi & Espiral (RS232)</span>
+              </button>
+
+              {navStats.isNavigating ? (
+                <button
+                  type="button"
+                  onClick={onPauseNavigation}
+                  className="px-3.5 py-2.5 bg-amber-500 hover:bg-amber-400 text-neutral-950 font-bold text-xs rounded-lg shadow-md transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Pause className="w-3.5 h-3.5 fill-current" />
+                  <span>Pausar</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onStartNavigation}
+                  className="px-3.5 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Reanudar</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={onResetToA}
+                className="px-3 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white border border-neutral-700 text-xs rounded-lg transition-colors cursor-pointer"
+                title="Detener motores y reposicionar"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Operational Status Tiles */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+            {/* Pose Actual del Rover */}
+            <div className="bg-neutral-950/80 p-2.5 rounded-lg border border-neutral-800">
+              <span className="text-[10px] text-neutral-400 block font-medium flex items-center gap-1">
+                <Bot className="w-3 h-3 text-cyan-400" /> Posición Actual del Bot:
+              </span>
+              <span className="font-mono text-xs font-bold text-cyan-300 block mt-0.5">
+                ({navStats.pointA?.x.toFixed(0) ?? 0}, {navStats.pointA?.y.toFixed(0) ?? 0}) cm
+              </span>
+              <span className="text-[10px] text-neutral-500 block">Rumbo: {navStats.state !== 'IDLE' ? 'Dinámico' : '90°'}</span>
+            </div>
+
+            {/* Centroide Voronoi / Lloyd */}
+            <div className="bg-neutral-950/80 p-2.5 rounded-lg border border-neutral-800">
+              <span className="text-[10px] text-neutral-400 block font-medium flex items-center gap-1">
+                <Orbit className="w-3 h-3 text-amber-400" /> Centroide Asignado (Lloyd):
+              </span>
+              <span className="font-mono text-xs font-bold text-amber-300 block mt-0.5">
+                ({assignedCentroid.x.toFixed(1)}, {assignedCentroid.y.toFixed(1)}) cm
+              </span>
+              <span className="text-[10px] text-neutral-500 block">
+                Celda #{voronoiResult?.assignedCellId ?? 1} · {voronoiResult?.lloydIterations ?? 8} iters
+              </span>
+            </div>
+
+            {/* Distancia Mínima entre Puntos Voronoi (≥ 5m) */}
+            <div className="bg-neutral-950/80 p-2.5 rounded-lg border border-cyan-500/30 shadow-sm shadow-cyan-950/40">
+              <span className="text-[10px] text-cyan-400 block font-medium flex items-center gap-1">
+                <Maximize2 className="w-3 h-3 text-cyan-400" /> Distancia Puntos Voronoi:
+              </span>
+              <span className="font-mono text-xs font-bold text-cyan-300 block mt-0.5 flex items-center gap-1">
+                {((voronoiResult?.minPointDistanceCm || 520) / 100).toFixed(1)} m
+                <span className="text-[9px] font-normal px-1 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  ≥ 5.0m OK
+                </span>
+              </span>
+              <span className="text-[10px] text-neutral-400 block">
+                Separación mínima garantizada
+              </span>
+            </div>
+
+            {/* Radio Actual de Espiral */}
+            <div className="bg-neutral-950/80 p-2.5 rounded-lg border border-neutral-800">
+              <span className="text-[10px] text-neutral-400 block font-medium flex items-center gap-1">
+                <Disc className="w-3 h-3 text-emerald-400" /> Radio Espiral r(θ):
+              </span>
+              <span className="font-mono text-xs font-bold text-emerald-300 block mt-0.5">
+                {navStats.spiralCurrentRadiusCm ? `${navStats.spiralCurrentRadiusCm} cm` : `${spiralConfig.a} cm`}
+              </span>
+              <span className="text-[10px] text-neutral-500 block">
+                Límite: {spiralConfig.maxRadiusCm} cm ({((navStats.spiralTurnsCompleted ?? 0)).toFixed(1)} v.)
+              </span>
+            </div>
+
+            {/* Esquive Inteligente en ESP32 */}
+            <div className="bg-neutral-950/80 p-2.5 rounded-lg border border-neutral-800">
+              <span className="text-[10px] text-neutral-400 block font-medium flex items-center gap-1">
+                <ShieldCheck className="w-3 h-3 text-purple-400" /> Esquives del ESP32:
+              </span>
+              <span className="font-mono text-xs font-bold text-purple-300 block mt-0.5">
+                {navStats.obstaclesAvoidedCount} reg.
+              </span>
+              <span className="text-[10px] text-neutral-500 block">
+                {hardwarePins.isObstacleAlert ? '⚠️ Obstáculo cercano' : 'Vía despejada'}
+              </span>
+            </div>
+          </div>
+
+          {/* Configuración de la Espiral de Arquímedes con Datos por Defecto */}
+          <div className="bg-neutral-950/70 p-3.5 rounded-xl border border-neutral-800 flex flex-col gap-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <Settings2 className="w-4 h-4 text-cyan-400" />
+                <span className="text-xs font-bold text-neutral-200">
+                  Configuración de la Espiral de Arquímedes: <span className="font-mono text-cyan-400">r(θ) = a + b·θ</span>
+                </span>
+              </div>
+
+              {/* Botón de restablecer valores por defecto */}
+              <button
+                type="button"
+                onClick={onResetSpiralDefaults}
+                className="text-[11px] text-neutral-400 hover:text-cyan-300 px-2.5 py-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 rounded transition-colors cursor-pointer flex items-center gap-1"
+                title="Restablecer los valores predeterminados de la espiral"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Valores por Defecto</span>
+              </button>
+            </div>
+
+            {/* Inputs Grid con valores por defecto bien definidos */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+              {/* Radio Inicial a */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-neutral-400 font-medium">
+                  Radio Inicial <span className="font-mono text-cyan-300">a (cm)</span>:
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  max="60"
+                  value={localA}
+                  onChange={(e) => setLocalA(e.target.value)}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-xs text-white font-mono outline-none focus:border-cyan-400"
+                  placeholder="5"
+                />
+                <span className="text-[9px] text-neutral-500">Por defecto: 5 cm</span>
+              </div>
+
+              {/* Paso entre espiras d */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-neutral-400 font-medium">
+                  Paso entre Vueltas <span className="font-mono text-cyan-300">d (cm)</span>:
+                </label>
+                <input
+                  type="number"
+                  min="12"
+                  max="80"
+                  value={localPitch}
+                  onChange={(e) => setLocalPitch(e.target.value)}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-xs text-white font-mono outline-none focus:border-cyan-400"
+                  placeholder="28"
+                />
+                <span className="text-[9px] text-neutral-500">Por defecto: 28 cm</span>
+              </div>
+
+              {/* Radio Máximo */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-neutral-400 font-medium">
+                  Radio Máximo <span className="font-mono text-cyan-300">R_max (cm)</span>:
+                </label>
+                <input
+                  type="number"
+                  min="50"
+                  max="280"
+                  value={localMaxRadius}
+                  onChange={(e) => setLocalMaxRadius(e.target.value)}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-xs text-white font-mono outline-none focus:border-cyan-400"
+                  placeholder="140"
+                />
+                <span className="text-[9px] text-neutral-500">Por defecto: 140 cm</span>
+              </div>
+
+              {/* Paso Angular Δθ */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-neutral-400 font-medium">
+                  Paso Angular <span className="font-mono text-cyan-300">Δθ (°)</span>:
+                </label>
+                <input
+                  type="number"
+                  min="5"
+                  max="25"
+                  value={localAngularSpeed}
+                  onChange={(e) => setLocalAngularSpeed(e.target.value)}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-xs text-white font-mono outline-none focus:border-cyan-400"
+                  placeholder="10"
+                />
+                <span className="text-[9px] text-neutral-500">Por defecto: 10°</span>
+              </div>
+
+              {/* Sentido de Giro */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-neutral-400 font-medium">Sentido de Rotación:</label>
+                <select
+                  value={localDirection}
+                  onChange={(e) => setLocalDirection(e.target.value as any)}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-xs text-white outline-none focus:border-cyan-400 cursor-pointer"
+                >
+                  <option value="clockwise">↻ Horario (CW)</option>
+                  <option value="counter_clockwise">↺ Antihorario (CCW)</option>
+                </select>
+                <span className="text-[9px] text-neutral-500">Por defecto: Horario</span>
+              </div>
+            </div>
+
+            {/* Presets rápidos y botón de aplicar */}
+            <div className="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-neutral-800/80">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] text-neutral-500">Plantillas rápidas:</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLocalA('5');
+                    setLocalPitch('28');
+                    setLocalMaxRadius('140');
+                    setLocalAngularSpeed('10');
+                    onUpdateSpiralConfig?.({ a: 5, pitchCm: 28, maxRadiusCm: 140, angularSpeedDeg: 10 });
+                  }}
+                  className="px-2 py-0.5 bg-neutral-900 hover:bg-neutral-800 text-[10px] text-neutral-300 rounded border border-neutral-800 cursor-pointer"
+                >
+                  Estándar (28cm / 140cm)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLocalA('4');
+                    setLocalPitch('18');
+                    setLocalMaxRadius('115');
+                    setLocalAngularSpeed('8');
+                    onUpdateSpiralConfig?.({ a: 4, pitchCm: 18, maxRadiusCm: 115, angularSpeedDeg: 8 });
+                  }}
+                  className="px-2 py-0.5 bg-neutral-900 hover:bg-neutral-800 text-[10px] text-neutral-300 rounded border border-neutral-800 cursor-pointer"
+                >
+                  Alta Densidad (18cm / 115cm)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLocalA('10');
+                    setLocalPitch('38');
+                    setLocalMaxRadius('190');
+                    setLocalAngularSpeed('12');
+                    onUpdateSpiralConfig?.({ a: 10, pitchCm: 38, maxRadiusCm: 190, angularSpeedDeg: 12 });
+                  }}
+                  className="px-2 py-0.5 bg-neutral-900 hover:bg-neutral-800 text-[10px] text-neutral-300 rounded border border-neutral-800 cursor-pointer"
+                >
+                  Gran Cobertura (38cm / 190cm)
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleApplySpiralConfig}
+                className="px-3 py-1 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 rounded text-xs font-semibold cursor-pointer transition-colors"
+              >
+                Aplicar Configuración a ESP32
+              </button>
+            </div>
+          </div>
+
+          {/* RS232 Simulation Packet Stream */}
+          <div className="bg-neutral-950 p-3 rounded-lg border border-neutral-800 text-[11px] font-mono flex flex-col gap-1.5">
+            <div className="flex items-center justify-between text-neutral-400">
+              <span className="flex items-center gap-1.5 text-xs font-bold text-amber-400">
+                <Wifi className="w-3.5 h-3.5" />
+                Simulador de Paquetes RS232 / UART (115200 bps):
+              </span>
+              <span className="text-[10px] text-emerald-400">LATCHED_ACTIVE</span>
+            </div>
+            <div className="bg-neutral-900/90 p-2 rounded text-neutral-300 text-[10px] break-all border border-neutral-800">
+              {voronoiResult?.rawRS232Packet || 'RS232:RX,[VORONOI_SYNC],STATUS=IDLE_WAITING_COMMAND'}
+            </div>
+            {rs232Logs.length > 1 && (
+              <span className="text-[9px] text-neutral-500">
+                Últimos eventos RS232: {rs232Logs.slice(1, 3).join(' | ')}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Recognition Tab: ESP32 Intelligent Obstacle Recognition Monitor */}
+      {activeTab === 'recognition' && (
         <div className="flex flex-col gap-3">
-          {/* Coordinates Row: Point A (Bot Position) & Point B (Free Destination) */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {/* Point A - Siempre es la posición actual del bot */}
-            <div className="flex flex-col gap-2 bg-neutral-950/70 p-3 rounded-lg border border-emerald-500/30">
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-1.5 font-bold text-emerald-400 text-xs">
-                  <Flag className="w-3.5 h-3.5 text-emerald-400" /> Punto A (Posición del Bot)
-                </span>
-                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  Tiempo Real (Bot)
-                </span>
-              </div>
-              <div className="grid grid-cols-2 gap-2 mt-0.5">
-                <div className="bg-neutral-900/90 p-2 rounded border border-neutral-800">
-                  <span className="text-[10px] text-neutral-500 block">X Origen (cm):</span>
-                  <span className="font-mono text-sm font-bold text-emerald-300">
-                    {navStats.pointA.x.toFixed(1)}
-                  </span>
-                </div>
-                <div className="bg-neutral-900/90 p-2 rounded border border-neutral-800">
-                  <span className="text-[10px] text-neutral-500 block">Y Origen (cm):</span>
-                  <span className="font-mono text-sm font-bold text-emerald-300">
-                    {navStats.pointA.y.toFixed(1)}
-                  </span>
-                </div>
-              </div>
-              <p className="text-[10px] text-neutral-400 italic leading-tight">
-                El Punto A se actualiza automáticamente con la ubicación del bot como punto de partida de la ruta.
+          <div className="bg-neutral-950 p-3 rounded-lg border border-amber-500/30 flex items-center justify-between">
+            <div>
+              <h4 className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 text-amber-400" />
+                Sistema de Reconocimiento Inteligente de Obstáculos en ESP32
+              </h4>
+              <p className="text-[10px] text-neutral-400 mt-0.5">
+                El firmware del ESP32 evalúa continuamente los ecos del sonar ultrasónico HC-SR04, proyecta los obstáculos en memoria y toma decisiones autónomas de evasión.
               </p>
             </div>
-
-            {/* Point B - Definición Libre por el Usuario */}
-            <div className="flex flex-col gap-2 bg-neutral-950/70 p-3 rounded-lg border border-amber-500/40 shadow-sm shadow-amber-500/5">
-              <div className="flex items-center justify-between flex-wrap gap-1">
-                <span className="flex items-center gap-1.5 font-bold text-amber-400 text-xs">
-                  <Target className="w-3.5 h-3.5 text-amber-400" /> Punto B (Destino Libre)
-                </span>
-                <button
-                  type="button"
-                  onClick={() => onInteractionModeChange(interactionMode === 'set_b' ? 'pan' : 'set_b')}
-                  className={`px-2.5 py-1 rounded text-[11px] font-medium border transition-all cursor-pointer flex items-center gap-1.5 ${
-                    interactionMode === 'set_b'
-                      ? 'bg-amber-500 text-neutral-950 border-amber-400 font-bold shadow-md shadow-amber-500/30 animate-pulse'
-                      : 'bg-neutral-900 text-amber-300 border-amber-500/40 hover:bg-amber-500/20'
-                  }`}
-                  title="Haz clic en cualquier parte del mapa para fijar el Punto B"
-                >
-                  <Target className="w-3 h-3" />
-                  <span>{interactionMode === 'set_b' ? 'Hacer Clic en Mapa...' : 'Clic en Mapa para fijar B'}</span>
-                </button>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 mt-0.5">
-                <div>
-                  <label className="text-[10px] text-neutral-400 block font-medium">X Destino (cm):</label>
-                  <input
-                    type="number"
-                    value={inputBx}
-                    onChange={(e) => setInputBx(e.target.value)}
-                    className="w-full bg-neutral-900 border border-neutral-700/80 rounded px-2.5 py-1 text-neutral-100 font-mono focus:border-amber-400 outline-none text-xs"
-                    placeholder="100"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] text-neutral-400 block font-medium">Y Destino (cm):</label>
-                  <input
-                    type="number"
-                    value={inputBy}
-                    onChange={(e) => setInputBy(e.target.value)}
-                    className="w-full bg-neutral-900 border border-neutral-700/80 rounded px-2.5 py-1 text-neutral-100 font-mono focus:border-amber-400 outline-none text-xs"
-                    placeholder="260"
-                  />
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between pt-1 border-t border-neutral-800/80">
-                <span className="text-[10px] text-neutral-400 font-mono">
-                  Distancia al Bot: <strong className="text-amber-300">{(navStats.distanceToGoalCm / 100).toFixed(2)} m</strong>
-                </span>
-                <button
-                  type="button"
-                  onClick={handleApplyPointB}
-                  className="text-[11px] text-amber-300 hover:text-white px-2.5 py-1 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded transition-colors cursor-pointer font-semibold"
-                >
-                  Aplicar Destino B
-                </button>
-              </div>
-            </div>
+            <span className="px-2 py-1 text-xs font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded">
+              {recognizedObstacles.length} en Memoria
+            </span>
           </div>
 
-          {/* Quick presets for Point B */}
-          <div className="flex items-center gap-1.5 flex-wrap px-1">
-            <span className="text-[10px] text-neutral-500 font-medium">Destinos rápidos para B:</span>
-            <button
-              type="button"
-              onClick={() => {
-                const nx = Number(navStats.pointA.x.toFixed(1));
-                const ny = Number((navStats.pointA.y + 200).toFixed(1));
-                setInputBx(nx.toString());
-                setInputBy(ny.toString());
-                onSetPointB(nx, ny);
-              }}
-              className="text-[10px] px-2 py-0.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 rounded transition-colors cursor-pointer"
-            >
-              +2.0m Frente
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                const nx = Number((navStats.pointA.x + 100).toFixed(1));
-                const ny = Number((navStats.pointA.y + 220).toFixed(1));
-                setInputBx(nx.toString());
-                setInputBy(ny.toString());
-                onSetPointB(nx, ny);
-              }}
-              className="text-[10px] px-2 py-0.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 rounded transition-colors cursor-pointer"
-            >
-              Noreste (+1.0m, +2.2m)
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                const nx = Number((navStats.pointA.x - 100).toFixed(1));
-                const ny = Number((navStats.pointA.y + 220).toFixed(1));
-                setInputBx(nx.toString());
-                setInputBy(ny.toString());
-                onSetPointB(nx, ny);
-              }}
-              className="text-[10px] px-2 py-0.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 rounded transition-colors cursor-pointer"
-            >
-              Noroeste (-1.0m, +2.2m)
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setInputBx('0');
-                setInputBy('340');
-                onSetPointB(0, 340);
-              }}
-              className="text-[10px] px-2 py-0.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 rounded transition-colors cursor-pointer"
-            >
-              Corredor Norte (0, 340)
-            </button>
-          </div>
-
-          {/* Algorithm Mode Selection */}
-          <div className="flex flex-col gap-1.5">
-            <label className="text-neutral-400 font-semibold text-[11px] flex items-center gap-1.5">
-              <Sliders className="w-3.5 h-3.5 text-amber-400" />
-              Algoritmo de Esquive y Optimización en ESP32:
-            </label>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <button
-                onClick={() => onSetAlgorithm('tangent_bug')}
-                className={`p-2.5 rounded-lg border text-left flex flex-col gap-1 transition-all cursor-pointer ${
-                  navStats.algorithm === 'tangent_bug'
-                    ? 'bg-amber-500/15 border-amber-500/60 text-amber-200 shadow-sm'
-                    : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700'
-                }`}
-              >
-                <div className="font-bold flex items-center justify-between">
-                  <span>Tangente Óptima (Bug)</span>
-                  {navStats.algorithm === 'tangent_bug' && (
-                    <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+          {/* Active Obstacles Table */}
+          <div className="bg-neutral-950 p-3 rounded-lg border border-neutral-800">
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px] text-left">
+                <thead className="bg-neutral-900/80 text-neutral-400 font-mono border-b border-neutral-800">
+                  <tr>
+                    <th className="py-1 px-2">Clúster / ID</th>
+                    <th className="py-1 px-2">Posición Mundo (X, Y)</th>
+                    <th className="py-1 px-2">Distancia</th>
+                    <th className="py-1 px-2">Amenaza</th>
+                    <th className="py-1 px-2">Acción Autónomo ESP32</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-neutral-900 font-mono text-neutral-300">
+                  {recognizedObstacles.length > 0 ? (
+                    recognizedObstacles.map((obs, idx) => (
+                      <tr key={idx} className="hover:bg-neutral-900/50">
+                        <td className="py-1.5 px-2 text-cyan-400 font-bold">{obs.id}</td>
+                        <td className="py-1.5 px-2">({obs.worldX}, {obs.worldY}) cm</td>
+                        <td className="py-1.5 px-2 font-bold">{obs.distanceCm.toFixed(1)} cm</td>
+                        <td className="py-1.5 px-2">
+                          {obs.threatLevel === 'critical' ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                              CRÍTICA (≤28cm)
+                            </span>
+                          ) : obs.threatLevel === 'medium' ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                              MEDIA (≤44cm)
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-neutral-800 text-neutral-400">
+                              BAJA (&gt;44cm)
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-1.5 px-2 text-neutral-300">
+                          {obs.recommendedAction === 'steer_right' ? (
+                            <span className="text-amber-300 font-bold">↷ Girar a la Derecha</span>
+                          ) : (
+                            <span className="text-amber-300 font-bold">↶ Girar a la Izquierda</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={5} className="py-4 text-center text-neutral-500 italic">
+                        No hay obstáculos en el campo cercano (&lt;65 cm) del rover actualmente.
+                      </td>
+                    </tr>
                   )}
-                </div>
-                <p className="text-[10px] text-neutral-400 leading-tight">
-                  Evalúa sectores y contornea el obstáculo por el lado que minimiza el desvío a B.
-                </p>
-              </button>
-
-              <button
-                onClick={() => onSetAlgorithm('reactive_sonar')}
-                className={`p-2.5 rounded-lg border text-left flex flex-col gap-1 transition-all cursor-pointer ${
-                  navStats.algorithm === 'reactive_sonar'
-                    ? 'bg-amber-500/15 border-amber-500/60 text-amber-200 shadow-sm'
-                    : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700'
-                }`}
-              >
-                <div className="font-bold flex items-center justify-between">
-                  <span>Sonar Reactivo Adaptativo</span>
-                  {navStats.algorithm === 'reactive_sonar' && (
-                    <span className="w-2 h-2 rounded-full bg-amber-400"></span>
-                  )}
-                </div>
-                <p className="text-[10px] text-neutral-400 leading-tight">
-                  Reduce rango a ±10° ante obstáculo (≤40cm) y vira hacia el sector con mayor holgura.
-                </p>
-              </button>
-
-              <button
-                onClick={() => onSetAlgorithm('potential_field')}
-                className={`p-2.5 rounded-lg border text-left flex flex-col gap-1 transition-all cursor-pointer ${
-                  navStats.algorithm === 'potential_field'
-                    ? 'bg-amber-500/15 border-amber-500/60 text-amber-200 shadow-sm'
-                    : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700'
-                }`}
-              >
-                <div className="font-bold flex items-center justify-between">
-                  <span>Campos de Potencial</span>
-                  {navStats.algorithm === 'potential_field' && (
-                    <span className="w-2 h-2 rounded-full bg-amber-400"></span>
-                  )}
-                </div>
-                <p className="text-[10px] text-neutral-400 leading-tight">
-                  Fuerza repulsiva del obstáculo combinada con atracción constante hacia la meta B.
-                </p>
-              </button>
-            </div>
-          </div>
-
-          {/* Firmware Rules Specification Card */}
-          <div className="bg-neutral-950/70 p-3 rounded-lg border border-neutral-800 text-[11px] flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <span className="flex items-center gap-1.5 font-bold text-amber-300">
-                <Zap className="w-3.5 h-3.5 text-amber-400" />
-                Reglas del Firmware ESP32 (Emulación y Código Físico):
-              </span>
-              <button
-                onClick={() => setActiveTab('firmware')}
-                className="text-[10px] text-emerald-400 hover:text-emerald-300 flex items-center gap-1 cursor-pointer font-medium"
-              >
-                <Code2 className="w-3 h-3" />
-                <span>Ver Código C++ Generado</span>
-              </button>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <div className="bg-neutral-900/80 p-2 rounded border border-purple-500/30">
-                <span className="font-bold text-purple-300 block mb-0.5">1. Sonda Ampliada</span>
-                <p className="text-neutral-400 text-[10px] leading-tight">
-                  Antes de alcanzar el obstáculo (≤46cm), detiene la marcha y amplía el barrido a ±65° (25°-155°) para mapear todas las posibles rutas.
-                </p>
-              </div>
-              <div className="bg-neutral-900/80 p-2 rounded border border-amber-500/30">
-                <span className="font-bold text-amber-300 block mb-0.5">2. Prioridad Derecha</span>
-                <p className="text-neutral-400 text-[10px] leading-tight">
-                  Esquiva siempre por la DERECHA si está despejada (≥42cm). Si la derecha está bloqueada, esquiva por la IZQUIERDA.
-                </p>
-              </div>
-              <div className="bg-neutral-900/80 p-2 rounded border border-rose-500/30">
-                <span className="font-bold text-rose-300 block mb-0.5">3. Escape Marcha Atrás</span>
-                <p className="text-neutral-400 text-[10px] leading-tight">
-                  Si se encuentra encerrado sin salida por ambos lados, da marcha atrás para validar y despejar una nueva ruta hacia B.
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* Primary Action Buttons */}
-          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-neutral-800">
-            <button
-              onClick={navStats.isNavigating ? onPauseNavigation : onStartNavigation}
-              className={`flex-1 min-w-[170px] flex items-center justify-center gap-2 py-2 px-4 rounded-lg font-bold transition-all cursor-pointer ${
-                navStats.isNavigating
-                  ? 'bg-amber-500 text-neutral-950 hover:bg-amber-400 shadow-md shadow-amber-500/20'
-                  : 'bg-emerald-500 text-neutral-950 hover:bg-emerald-400 shadow-md shadow-emerald-500/20'
-              }`}
-            >
-              {navStats.isNavigating ? (
-                <>
-                  <Pause className="w-4 h-4" />
-                  <span>Pausar Navegación ESP32</span>
-                </>
-              ) : (
-                <>
-                  <Play className="w-4 h-4" />
-                  <span>Iniciar Exploración Autónoma ESP32</span>
-                </>
-              )}
-            </button>
-
-            <button
-              onClick={() => setActiveTab('firmware')}
-              className="flex items-center gap-1.5 py-2 px-3 bg-neutral-800 hover:bg-neutral-700 text-emerald-300 rounded-lg font-medium border border-neutral-700 transition-colors cursor-pointer"
-              title="Ver el código C++ generado para ESP32"
-            >
-              <Code2 className="w-3.5 h-3.5" />
-              <span>Código C++</span>
-            </button>
-
-            <button
-              onClick={onResetToA}
-              className="flex items-center gap-1.5 py-2 px-3 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg font-medium border border-neutral-700 transition-colors cursor-pointer"
-              title="Reposicionar el rover en el Punto A"
-            >
-              <RotateCcw className="w-3.5 h-3.5 text-neutral-400" />
-              <span>Reiniciar en A</span>
-            </button>
-          </div>
-
-          {/* Real-time Navigation Telemetry Card */}
-          <div className="bg-neutral-950 border border-neutral-800/90 rounded-lg p-3 grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
-            <div className="flex flex-col">
-              <span className="text-[10px] text-neutral-500">Estado ESP32</span>
-              <div className="mt-1">{getStatusBadge()}</div>
-            </div>
-
-            <div className="flex flex-col">
-              <span className="text-[10px] text-neutral-500">Distancia Restante a B</span>
-              <span className="text-sm font-bold font-mono text-amber-400 mt-0.5">
-                {navStats.distanceToGoalCm.toFixed(1)} cm
-              </span>
-            </div>
-
-            <div className="flex flex-col">
-              <span className="text-[10px] text-neutral-500">Recorrido Total (Odometría)</span>
-              <span className="text-sm font-bold font-mono text-neutral-200 mt-0.5">
-                {navStats.actualDistanceTraveledCm.toFixed(1)} cm
-              </span>
-            </div>
-
-            <div className="flex flex-col">
-              <span className="text-[10px] text-neutral-500">Eficiencia vs Recta</span>
-              <span
-                className={`text-sm font-bold font-mono mt-0.5 ${
-                  navStats.efficiencyPercentage >= 85
-                    ? 'text-emerald-400'
-                    : navStats.efficiencyPercentage >= 65
-                    ? 'text-amber-400'
-                    : 'text-orange-400'
-                }`}
-              >
-                {navStats.efficiencyPercentage > 0 ? `${navStats.efficiencyPercentage.toFixed(0)}%` : '100%'}
-              </span>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
       )}
 
-      {/* Obstacles Tab */}
+      {/* Obstacles Placement Tab */}
       {activeTab === 'obstacles' && (
         <div className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-neutral-400 text-[11px]">
-              Añade obstáculos dinámicos en el mapa para probar la capacidad del ESP32 de detectarlos y esquivarlos en tiempo real.
+              Añade o genera obstáculos dinámicos en el mapa para evaluar la capacidad de reconocimiento inteligente del ESP32.
             </p>
 
             <button
@@ -556,35 +686,34 @@ export const ESP32AlgorithmWorkbench: React.FC<ESP32AlgorithmWorkbenchProps> = (
               }`}
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>{interactionMode === 'add_obstacle' ? 'Haz Clic en el Mapa para Colocar' : 'Clic para Añadir'}</span>
+              <span>{interactionMode === 'add_obstacle' ? 'Clic en el Mapa para Colocar' : 'Clic para Añadir'}</span>
             </button>
           </div>
 
-          {/* Quick Presets Generator */}
-          <div className="flex flex-wrap items-center gap-2 bg-neutral-950 p-2 rounded-lg border border-neutral-800">
-            <span className="text-neutral-500 text-[11px] font-medium">Escenarios Rápidos:</span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[10px] text-neutral-500 font-medium">Plantillas de obstáculos:</span>
             <button
               onClick={() => onSpawnObstaclesPreset('center')}
-              className="px-2 py-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 rounded text-neutral-200 transition-colors cursor-pointer"
+              className="text-[10px] px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 cursor-pointer"
             >
-              Bloque Central Directo
+              Bloque Central
             </button>
             <button
               onClick={() => onSpawnObstaclesPreset('zigzag')}
-              className="px-2 py-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 rounded text-neutral-200 transition-colors cursor-pointer"
+              className="text-[10px] px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 cursor-pointer"
             >
-              Laberinto Zigzag
+              Columnas de Prueba
             </button>
             <button
               onClick={() => onSpawnObstaclesPreset('scatter')}
-              className="px-2 py-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 rounded text-neutral-200 transition-colors cursor-pointer"
+              className="text-[10px] px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 cursor-pointer"
             >
-              Campo Disperso (4 Rocas)
+              Dispersión Aleatoria
             </button>
             {dynamicObstacles.length > 0 && (
               <button
                 onClick={onClearObstacles}
-                className="px-2 py-1 bg-red-950/40 hover:bg-red-900/50 border border-red-800/60 rounded text-red-300 ml-auto transition-colors cursor-pointer flex items-center gap-1"
+                className="text-[10px] px-2.5 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 cursor-pointer ml-auto flex items-center gap-1"
               >
                 <Trash2 className="w-3 h-3" />
                 <span>Borrar Todos</span>
@@ -593,94 +722,55 @@ export const ESP32AlgorithmWorkbench: React.FC<ESP32AlgorithmWorkbenchProps> = (
           </div>
 
           {/* List of active obstacles */}
-          <div className="flex flex-col gap-1.5 max-h-48 overflow-y-auto pr-1">
-            {dynamicObstacles.length === 0 ? (
-              <div className="text-center py-6 text-neutral-500 border border-dashed border-neutral-800 rounded-lg">
-                No hay obstáculos dinámicos en el mapa. El bot tendrá vía libre directa hacia B.
-              </div>
-            ) : (
-              dynamicObstacles.map((obs, idx) => (
-                <div
-                  key={obs.id}
-                  className="flex items-center justify-between p-2 bg-neutral-950 border border-neutral-800 rounded-lg text-[11px]"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
-                    <span className="font-semibold text-neutral-200">
-                      {obs.label || `Obstáculo #${idx + 1}`}
-                    </span>
-                    <span className="font-mono text-neutral-400">
-                      (X: {obs.x.toFixed(0)}, Y: {obs.y.toFixed(0)}) · Radio: {obs.radius}cm
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => onRemoveObstacle(obs.id)}
-                    className="p-1 hover:text-red-400 text-neutral-500 transition-colors cursor-pointer"
-                    title="Eliminar este obstáculo"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {dynamicObstacles.map((obs) => (
+              <div
+                key={obs.id}
+                className="flex items-center justify-between p-2 rounded bg-neutral-950 border border-neutral-800 text-xs"
+              >
+                <div className="flex flex-col">
+                  <span className="font-bold text-amber-300">{obs.label || 'Obstáculo'}</span>
+                  <span className="text-[10px] text-neutral-400 font-mono">
+                    Pos: ({obs.x.toFixed(0)}, {obs.y.toFixed(0)})cm · Radio: {obs.radius}cm
+                  </span>
                 </div>
-              ))
-            )}
+                <button
+                  onClick={() => onRemoveObstacle(obs.id)}
+                  className="p-1 text-neutral-500 hover:text-rose-400 cursor-pointer"
+                  title="Eliminar este obstáculo"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       )}
 
-      {/* Dynamic C++ ESP32 Firmware Tab */}
+      {/* Firmware C++ Tab */}
       {activeTab === 'firmware' && (
         <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center justify-between gap-2 bg-neutral-950 p-2.5 rounded-lg border border-neutral-800">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <div>
-              <span className="font-bold text-neutral-200 text-xs flex items-center gap-1.5">
-                <Code2 className="w-4 h-4 text-emerald-400" />
-                Firmware C++ ESP32 (Arduino / PlatformIO)
-              </span>
-              <p className="text-[11px] text-neutral-400">
-                Código compilable con parámetros automáticos para Punto A ({navStats.pointA.x.toFixed(0)}, {navStats.pointA.y.toFixed(0)}) ➔ Punto B ({navStats.pointB.x.toFixed(0)}, {navStats.pointB.y.toFixed(0)}).
+              <h4 className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                <Code2 className="w-4 h-4" />
+                Código C++ para ESP32: Voronoi, RS232, Reconocimiento & Espiral de Arquímedes
+              </h4>
+              <p className="text-[10px] text-neutral-400">
+                Compilable directamente en Arduino IDE o PlatformIO.
               </p>
             </div>
-
             <div className="flex items-center gap-2">
               <button
-                onClick={() => {
-                  const code = generateEsp32WorldFirmwareCode({
-                    pointAx: navStats.pointA.x,
-                    pointAy: navStats.pointA.y,
-                    pointBx: navStats.pointB.x,
-                    pointBy: navStats.pointB.y,
-                    motorPwm: hardwarePins.motorPwm || 185,
-                  });
-                  navigator.clipboard.writeText(code);
-                  setCopiedCode(true);
-                  setTimeout(() => setCopiedCode(false), 2500);
-                }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 transition-colors cursor-pointer text-xs font-medium"
+                onClick={handleCopyFirmware}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-medium border border-neutral-700 cursor-pointer transition-colors"
               >
                 {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copiedCode ? '¡Copiado!' : 'Copiar Código'}</span>
               </button>
-
               <button
-                onClick={() => {
-                  const code = generateEsp32WorldFirmwareCode({
-                    pointAx: navStats.pointA.x,
-                    pointAy: navStats.pointA.y,
-                    pointBx: navStats.pointB.x,
-                    pointBy: navStats.pointB.y,
-                    motorPwm: hardwarePins.motorPwm || 185,
-                  });
-                  const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement('a');
-                  a.href = url;
-                  a.download = 'ESP32_A_to_B_Autonomous_Navigator.ino';
-                  document.body.appendChild(a);
-                  a.click();
-                  document.body.removeChild(a);
-                  URL.revokeObjectURL(url);
-                }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium transition-colors cursor-pointer text-xs"
+                onClick={handleDownloadFirmware}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-neutral-950 text-xs font-bold cursor-pointer transition-colors shadow-sm"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Descargar .ino</span>
@@ -688,70 +778,45 @@ export const ESP32AlgorithmWorkbench: React.FC<ESP32AlgorithmWorkbenchProps> = (
             </div>
           </div>
 
-          <div className="relative">
-            <pre className="p-3 bg-neutral-950 border border-neutral-800 rounded-lg text-[10px] font-mono text-emerald-300 max-h-64 overflow-y-auto leading-relaxed select-all">
-              {generateEsp32WorldFirmwareCode({
-                pointAx: navStats.pointA.x,
-                pointAy: navStats.pointA.y,
-                pointBx: navStats.pointB.x,
-                pointBy: navStats.pointB.y,
-                motorPwm: hardwarePins.motorPwm || 185,
-              })}
-            </pre>
-          </div>
+          <pre className="p-3 bg-neutral-950 rounded-lg border border-neutral-800 text-[11px] font-mono text-emerald-300 overflow-x-auto max-h-[380px] leading-relaxed">
+            {generateEsp32WorldFirmwareCode(navStats, dynamicObstacles, hardwarePins)}
+          </pre>
         </div>
       )}
 
-      {/* Hardware Virtual Pins Tab */}
+      {/* Hardware Pins Monitor */}
       {activeTab === 'hardware' && (
-        <div className="flex flex-col gap-3">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <div className="bg-neutral-950 p-2.5 rounded-lg border border-neutral-800">
-              <span className="text-[10px] text-neutral-500 block">GPIO 18 (SERVO PWM)</span>
-              <span className="text-sm font-mono font-bold text-amber-400 mt-1 block">
-                {hardwarePins.servoAngle}°
-              </span>
-              <span className="text-[10px] text-neutral-400 mt-0.5 block">
-                Periodo 50Hz (500-2400µs)
-              </span>
-            </div>
-
-            <div className="bg-neutral-950 p-2.5 rounded-lg border border-neutral-800">
-              <span className="text-[10px] text-neutral-500 block">GPIO 5 & 19 (TRIG/ECHO)</span>
-              <span className="text-sm font-mono font-bold text-cyan-400 mt-1 block">
-                {hardwarePins.lastDistCm.toFixed(1)} cm
-              </span>
-              <span className="text-[10px] text-neutral-400 mt-0.5 block">
-                {hardwarePins.lastDistCm <= 40 ? 'OBSTÁCULO DETECTADO' : 'CAMINO DESPEJADO'}
-              </span>
-            </div>
-
-            <div className="bg-neutral-950 p-2.5 rounded-lg border border-neutral-800">
-              <span className="text-[10px] text-neutral-500 block">GPIO 25/26/32/33 (MOTORES)</span>
-              <span className="text-sm font-mono font-bold text-emerald-400 mt-1 block">
-                PWM {hardwarePins.motorPwm}
-              </span>
-              <span className="text-[10px] text-neutral-400 mt-0.5 block">
-                Puente H Calibrado (175-198)
-              </span>
-            </div>
-
-            <div className="bg-neutral-950 p-2.5 rounded-lg border border-neutral-800">
-              <span className="text-[10px] text-neutral-500 block">CPU Virtual ESP32</span>
-              <span className="text-sm font-mono font-bold text-neutral-200 mt-1 block">
-                240 MHz · 40Hz
-              </span>
-              <span className="text-[10px] text-neutral-400 mt-0.5 block">
-                Loop Time: ~2.4ms (Bajo consumo)
-              </span>
-            </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+          <div className="bg-neutral-950 p-2.5 rounded-lg border border-neutral-800">
+            <span className="text-[10px] text-neutral-500 block">GPIO 18 · Servomotor Radar</span>
+            <span className="font-mono text-sm font-bold text-cyan-400 mt-0.5 block">
+              {hardwarePins.servoAngle}°
+            </span>
+            <span className="text-[9px] text-neutral-500">Ángulo servo barrido</span>
           </div>
 
-          <div className="p-2.5 bg-neutral-950 rounded-lg border border-neutral-800 text-[11px] text-neutral-400 leading-relaxed">
-            <span className="text-amber-400 font-bold block mb-1">
-              Emulación en Tiempo Real de Instrucciones Seriales UART:
+          <div className="bg-neutral-950 p-2.5 rounded-lg border border-neutral-800">
+            <span className="text-[10px] text-neutral-500 block">GPIO 5 / 19 · HC-SR04 Sonar</span>
+            <span className="font-mono text-sm font-bold text-amber-400 mt-0.5 block">
+              {hardwarePins.lastDistCm.toFixed(1)} cm
             </span>
-            El emulador interno de ESP32 procesa en bucle cerrado los comandos <code className="text-neutral-300 font-mono">SET_A</code>, <code className="text-neutral-300 font-mono">SET_B</code>, <code className="text-neutral-300 font-mono">NAV_TO_B</code> y emite telemetría exacta <code className="text-neutral-300 font-mono">PING:ángulo,dist</code>, <code className="text-neutral-300 font-mono">ALERT:OBSTACLE_REDUCED_SPAN</code> y <code className="text-neutral-300 font-mono">POS:x,y,rumbo</code> idéntica a la que recibirías por el puerto USB serial físico de tu placa ESP32.
+            <span className="text-[9px] text-neutral-500">Eco ultrasónico frontal</span>
+          </div>
+
+          <div className="bg-neutral-950 p-2.5 rounded-lg border border-neutral-800">
+            <span className="text-[10px] text-neutral-500 block">GPIO 25, 26, 32, 33 · PWM Tracción</span>
+            <span className="font-mono text-sm font-bold text-emerald-400 mt-0.5 block">
+              {hardwarePins.motorPwm} / 255
+            </span>
+            <span className="text-[9px] text-neutral-500">Motores DC Puente H</span>
+          </div>
+
+          <div className="bg-neutral-950 p-2.5 rounded-lg border border-neutral-800">
+            <span className="text-[10px] text-neutral-500 block">UART Serial RS232</span>
+            <span className="font-mono text-sm font-bold text-purple-400 mt-0.5 block">
+              115200 bps
+            </span>
+            <span className="text-[9px] text-neutral-500">TX / RX Bidireccional</span>
           </div>
         </div>
       )}
